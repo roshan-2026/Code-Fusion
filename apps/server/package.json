@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -b",
+    "build": "tsc -b ../../packages/shared && tsc -b",
     "start": "node dist/index.js",
     "clean": "rimraf dist"
   },

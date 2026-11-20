@@ -23,7 +23,7 @@ interface WorkspaceProps {
 export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeaveRoom }) => {
   const [files, setFiles] = useState<WorkspaceFile[]>(() => {
     if (room.files && room.files.length > 0) {
-      return room.files.map((f) => ({
+      return room.files.map((f: any) => ({
         id: f.id,
         name: f.name,
         path: f.path,
