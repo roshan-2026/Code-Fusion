@@ -4,7 +4,8 @@ const STYLE_ELEMENT_ID = 'hostelcode-dynamic-cursors';
 
 /**
  * Injects and dynamically updates CSS rules for Monaco Editor remote cursors
- * based on Yjs Awareness client states.
+ * based on Yjs Awareness client states, including collision stacking when multiple
+ * users share the same line and column.
  */
 export function updateCursorStyles(awareness: Awareness): void {
   let styleEl = document.getElementById(STYLE_ELEMENT_ID) as HTMLStyleElement | null;
@@ -36,6 +37,32 @@ export function updateCursorStyles(awareness: Awareness): void {
       left: -4px;
       top: -5px;
       pointer-events: none;
+    }
+
+    /* Stagger rules when multiple cursors meet at the same line & col */
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-1 {
+      margin-left: 3px !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-1::before {
+      top: -2.7em !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-2 {
+      margin-left: 6px !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-2::before {
+      top: -4.0em !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-3 {
+      margin-left: 9px !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-3::before {
+      top: -5.3em !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-4 {
+      margin-left: 12px !important;
+    }
+    .yRemoteSelectionHead.yRemoteSelectionHead-stack-4::before {
+      top: -6.6em !important;
     }
   `;
 

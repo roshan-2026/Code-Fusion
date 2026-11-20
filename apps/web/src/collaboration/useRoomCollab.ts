@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import * as Y from 'yjs';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import { IndexeddbPersistence } from 'y-indexeddb';
-import { MonacoBinding } from 'y-monaco';
+import { MonacoCollabBinding } from './MonacoCollabBinding';
 import type * as monacoEditor from 'monaco-editor';
 import { buildDocumentName } from '@hostelcode/shared';
 import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage } from '@hostelcode/shared';
@@ -27,87 +27,79 @@ interface UseRoomCollabOptions {
 }
 
 /**
- * Deduplicates concurrent identical line insertions or intra-line duplicate statements.
+ * Safely reconciles concurrent identical line insertions after an offline reconnection.
+ * Uses targeted character-range deletions rather than wiping the document, preserving
+ * all other lines, cursor selections, and CRDT history.
  */
-function deduplicateAndReconcile(
-  content: string,
-  baselineContent?: string | null
-): {
-  deduped: string;
-  hasDuplicates: boolean;
-  affectedLines: number[];
-} {
-  const lines = content.split('\n');
-  const result: string[] = [];
-  const affectedLines: number[] = [];
-  let hasDuplicates = false;
+function reconcileOfflineSync(
+  fileDoc: Y.Doc,
+  baselineContent: string | null
+): number[] {
+  const yText = fileDoc.getText('monaco');
+  const currentContent = yText.toString();
+  if (!currentContent) return [];
+
+  const lines = currentContent.split('\n');
+  const baselineLines = baselineContent ? baselineContent.split('\n') : [];
+
+  // Check baseline for consecutive duplicates so we never remove intentional duplicates in existing code
+  const baselineConsecutiveDupes = new Set<string>();
+  for (let i = 0; i < baselineLines.length - 1; i++) {
+    const t = baselineLines[i].trim();
+    if (t.length > 0 && t === baselineLines[i + 1].trim()) {
+      baselineConsecutiveDupes.add(t);
+    }
+  }
+
+  // Find newly introduced concurrent duplicate lines
+  const duplicateRanges: { start: number; length: number }[] = [];
+  let currentOffset = 0;
 
   for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
-
-    // Check intra-line duplicate: e.g. "const x = 1;const x = 1;"
+    const line = lines[i];
+    const lineLen = line.length + (i < lines.length - 1 ? 1 : 0);
     const trimmed = line.trim();
-    if (trimmed.length >= 6 && trimmed.length % 2 === 0) {
-      const halfLen = trimmed.length / 2;
-      const first = trimmed.slice(0, halfLen);
-      const second = trimmed.slice(halfLen);
-      if (first === second) {
-        const leadingSpaces = line.match(/^\s*/)?.[0] || '';
-        line = leadingSpaces + first;
-        hasDuplicates = true;
-        affectedLines.push(result.length + 1);
-      }
-    }
 
-    // Check consecutive identical duplicate lines
-    if (result.length > 0) {
-      const prevLine = result[result.length - 1];
-      if (line.trim().length > 0 && line === prevLine) {
-        hasDuplicates = true;
-        affectedLines.push(result.length);
-        continue;
-      }
-    }
-
-    result.push(line);
-  }
-
-  // Also check 2-line block duplicate
-  const finalLines: string[] = [];
-  for (let i = 0; i < result.length; i++) {
     if (
-      i + 3 < result.length &&
-      result[i].trim().length > 0 &&
-      result[i] === result[i + 2] &&
-      result[i + 1] === result[i + 3]
+      i > 0 &&
+      trimmed.length >= 3 &&
+      trimmed === lines[i - 1].trim() &&
+      !baselineConsecutiveDupes.has(trimmed)
     ) {
-      finalLines.push(result[i]);
-      finalLines.push(result[i + 1]);
-      affectedLines.push(finalLines.length - 1, finalLines.length);
-      i += 3;
-      hasDuplicates = true;
-      continue;
+      // Line i is an accidental duplicate of line i-1 caused by concurrent offline merge
+      duplicateRanges.push({
+        start: currentOffset,
+        length: lineLen,
+      });
     }
-    finalLines.push(result[i]);
+
+    currentOffset += lineLen;
   }
 
-  const finalOutput = finalLines.join('\n');
+  // Delete redundant duplicate lines in reverse order to preserve earlier offsets
+  if (duplicateRanges.length > 0) {
+    fileDoc.transact(() => {
+      for (let j = duplicateRanges.length - 1; j >= 0; j--) {
+        const r = duplicateRanges[j];
+        yText.delete(r.start, r.length);
+      }
+    }, 'offline-duplicate-reconcile');
+  }
 
-  if (baselineContent) {
-    const baselineLines = baselineContent.split('\n');
-    const outLines = finalOutput.split('\n');
-    for (let i = 0; i < outLines.length; i++) {
-      if (outLines[i] !== baselineLines[i] && outLines[i].trim().length > 0) {
+  // Calculate affected lines for yellow highlighting
+  const finalContent = yText.toString();
+  const finalLines = finalContent.split('\n');
+  const affectedLines: number[] = [];
+
+  for (let i = 0; i < finalLines.length; i++) {
+    if (i >= baselineLines.length || finalLines[i] !== baselineLines[i]) {
+      if (finalLines[i].trim().length > 0) {
         affectedLines.push(i + 1);
       }
     }
   }
 
-  return {
-    deduped: finalOutput,
-    hasDuplicates,
-    affectedLines: Array.from(new Set(affectedLines)).sort((a, b) => a - b),
-  };
+  return affectedLines;
 }
 
 export function useRoomCollab({
@@ -138,7 +130,7 @@ export function useRoomCollab({
   const fileDocRef = useRef<Y.Doc | null>(null);
   const fileProviderRef = useRef<HocuspocusProvider | null>(null);
   const fileIndexeddbRef = useRef<IndexeddbPersistence | null>(null);
-  const bindingRef = useRef<MonacoBinding | null>(null);
+  const bindingRef = useRef<MonacoCollabBinding | null>(null);
   const undoManagerRef = useRef<Y.UndoManager | null>(null);
 
   // Offline highlight tracking
@@ -399,70 +391,12 @@ export function useRoomCollab({
       }
     };
 
-    // Sanitize any corrupt repeated duplicate copies caused by previous buggy refreshes
-    const sanitizeDuplicatesIfCorrupted = () => {
-      const yText = fileDoc.getText('monaco');
-      const current = yText.toString();
-      if (!current || !seedContent) return;
-
-      const cleanSeed = seedContent.trim();
-      const trimmedCurrent = current.trim();
-
-      if (cleanSeed.length > 0 && trimmedCurrent.length > cleanSeed.length) {
-        let repeated = cleanSeed;
-        let isMultiple = false;
-        for (let k = 2; k <= 30; k++) {
-          repeated += '\n' + cleanSeed;
-          if (trimmedCurrent === repeated || trimmedCurrent === cleanSeed.repeat(k)) {
-            isMultiple = true;
-            break;
-          }
-        }
-
-        if (isMultiple) {
-          console.log('[Collab] Sanitized repeated duplicate copies in document history');
-          fileDoc.transact(() => {
-            yText.delete(0, yText.length);
-            yText.insert(0, seedContent);
-          }, 'clean-duplicate-history');
-          return;
-        }
-      }
-
-      // Reconcile and highlight offline edits if user was actually offline
-      if (wasOfflineRef.current) {
-        const { deduped, hasDuplicates, affectedLines } = deduplicateAndReconcile(
-          current,
-          offlineBaselineTextRef.current
-        );
-
-        if (hasDuplicates) {
-          fileDoc.transact(() => {
-            yText.delete(0, yText.length);
-            yText.insert(0, deduped);
-          }, 'reconciliation');
-        }
-
-        if (affectedLines.length > 0 && editor) {
-          applyYellowHighlights(editor, affectedLines);
-          setSyncNotice(
-            `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
-          );
-          setTimeout(() => setSyncNotice(null), 8000);
-        }
-
-        wasOfflineRef.current = false;
-        offlineBaselineTextRef.current = null;
-      }
-    };
-
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
     fileIndexeddbRef.current = fileIndexeddb;
 
     fileIndexeddb.once('synced', () => {
       seedIfEmpty();
-      sanitizeDuplicatesIfCorrupted();
     });
 
     const fileProvider = new HocuspocusProvider({
@@ -476,7 +410,25 @@ export function useRoomCollab({
       }),
       onSynced() {
         seedIfEmpty();
-        sanitizeDuplicatesIfCorrupted();
+
+        // Safely reconcile offline edits without destroying document history
+        if (wasOfflineRef.current) {
+          const affectedLines = reconcileOfflineSync(
+            fileDoc,
+            offlineBaselineTextRef.current
+          );
+
+          if (affectedLines.length > 0 && editor) {
+            applyYellowHighlights(editor, affectedLines);
+            setSyncNotice(
+              `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
+            );
+            setTimeout(() => setSyncNotice(null), 8000);
+          }
+
+          wasOfflineRef.current = false;
+          offlineBaselineTextRef.current = null;
+        }
       },
       onDisconnect() {
         wasOfflineRef.current = true;
@@ -510,11 +462,11 @@ export function useRoomCollab({
       updateCursorStyles(fileAwareness);
     }
 
-    // Bind Monaco Editor to Yjs Text
+    // Bind Monaco Editor to Yjs Text using our enhanced MonacoCollabBinding
     if (editor && editor.getModel() && fileAwareness) {
       const yText = fileDoc.getText('monaco');
       try {
-        const binding = new MonacoBinding(
+        const binding = new MonacoCollabBinding(
           yText,
           editor.getModel()!,
           new Set([editor]),
