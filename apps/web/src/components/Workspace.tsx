@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Files, Search, Users, Settings } from 'lucide-react';
 import type * as monacoEditor from 'monaco-editor';
 import { Header } from './Header';
@@ -10,7 +10,12 @@ import { TabBar } from './Editor/TabBar';
 import { CodeEditor } from './Editor/CodeEditor';
 import { StatusBar } from './StatusBar';
 import { useRoomCollab } from '../collaboration/useRoomCollab';
-import { updateRoomFilesLocally } from '../lib/roomStorage';
+import {
+  updateRoomFilesLocally,
+  recycleFileOnServer,
+  restoreFileOnServer,
+  votePermanentDeleteOnServer,
+} from '../lib/roomStorage';
 import type { WorkspaceFile, SidebarView, EditorSettings } from '../types/workspace';
 import type { Room, AuthUser, SupportedLanguage } from '@hostelcode/shared';
 
@@ -29,16 +34,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         path: f.path,
         language: f.language,
         content: f.content,
+        isRecycled: Boolean(f.isRecycled),
+        recycledBy: f.recycledBy,
+        recycledAt: f.recycledAt,
+        deleteVotes: Array.isArray(f.deleteVotes) ? f.deleteVotes : [],
       }));
     }
     return [];
   });
 
+  const activeFiles = files.filter((f) => !f.isRecycled);
+
   const [openFileIds, setOpenFileIds] = useState<string[]>(() =>
-    files.length > 0 ? [files[0].id] : []
+    activeFiles.length > 0 ? [activeFiles[0].id] : []
   );
   const [activeFileId, setActiveFileId] = useState<string>(() =>
-    files.length > 0 ? files[0].id : ''
+    activeFiles.length > 0 ? activeFiles[0].id : ''
   );
   const [activeSidebar, setActiveSidebar] = useState<SidebarView | null>('explorer');
   const [cursorPos, setCursorPos] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
@@ -53,11 +64,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     lineNumbers: 'on',
   });
 
-  const activeFile = files.find((f) => f.id === activeFileId) || files[0];
-  const openFiles = files.filter((f) => openFileIds.includes(f.id));
+  const activeFile = files.find((f) => f.id === activeFileId && !f.isRecycled) || activeFiles[0];
+  const openFiles = files.filter((f) => openFileIds.includes(f.id) && !f.isRecycled);
 
-  // Connect CRDT, Presence and Per-User Undo Hook
-  const { connectionStatus, members, canUndo, canRedo, undo, redo } = useRoomCollab({
+  // Connect CRDT, Presence, Per-User Undo, and Offline Sync Hook
+  const { connectionStatus, members, canUndo, canRedo, undo, redo, syncNotice } = useRoomCollab({
     roomCode: room.code,
     activeFileId: activeFile ? activeFile.id : '',
     initialContent: activeFile ? activeFile.content : '',
@@ -78,6 +89,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         files.map((f) => ({
           ...f,
           projectId: room.code,
+          isRecycled: f.isRecycled,
+          recycledBy: f.recycledBy,
+          recycledAt: f.recycledAt,
+          deleteVotes: f.deleteVotes,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         })),
@@ -85,6 +100,36 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
       );
     }
   }, [files, room.code, currentUser]);
+
+  // Save / Download active file locally to computer
+  const handleSaveFile = useCallback(() => {
+    if (!activeFile) return;
+    try {
+      const blob = new Blob([activeFile.content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = activeFile.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('[Download] Failed to save file:', err);
+    }
+  }, [activeFile]);
+
+  // Keyboard shortcut Ctrl+S / Cmd+S to download / save active file
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSaveFile();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleSaveFile]);
 
   // Switch or open a file
   const handleSelectFile = (fileId: string) => {
@@ -112,22 +157,86 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
       path: `/${name}`,
       language,
       content: content !== undefined ? content : `// ${name}\n`,
+      isRecycled: false,
+      deleteVotes: [],
     };
     setFiles((prev) => [...prev, newFile]);
     setOpenFileIds((prev) => (prev.includes(newFile.id) ? prev : [...prev, newFile.id]));
     setActiveFileId(newFile.id);
   };
 
-  // Delete a file
-  const handleDeleteFile = (fileId: string) => {
-    const nextFiles = files.filter((f) => f.id !== fileId);
-    setFiles(nextFiles);
+  // Move a file to Recycle Bin
+  const handleRecycleFile = (fileId: string) => {
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === fileId
+          ? {
+              ...f,
+              isRecycled: true,
+              recycledBy: currentUser.name,
+              recycledAt: new Date().toISOString(),
+              deleteVotes: [currentUser.id],
+            }
+          : f
+      )
+    );
+
+    // Close tab if open
     const nextOpen = openFileIds.filter((id) => id !== fileId);
     setOpenFileIds(nextOpen);
     if (activeFileId === fileId) {
+      const remainingActive = files.filter((f) => f.id !== fileId && !f.isRecycled);
       setActiveFileId(
-        nextOpen.length > 0 ? nextOpen[0] : nextFiles.length > 0 ? nextFiles[0].id : ''
+        nextOpen.length > 0 ? nextOpen[0] : remainingActive.length > 0 ? remainingActive[0].id : ''
       );
+    }
+
+    recycleFileOnServer(room.code, fileId, currentUser);
+  };
+
+  // Restore file from Recycle Bin
+  const handleRestoreFile = (fileId: string) => {
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === fileId
+          ? {
+              ...f,
+              isRecycled: false,
+              recycledBy: undefined,
+              recycledAt: undefined,
+              deleteVotes: [],
+            }
+          : f
+      )
+    );
+
+    restoreFileOnServer(room.code, fileId, currentUser);
+  };
+
+  // Vote for permanent deletion (consensus of all members required)
+  const handleVotePermanentDelete = async (fileId: string) => {
+    const file = files.find((f) => f.id === fileId);
+    if (!file) return;
+
+    const currentVotes = file.deleteVotes || [];
+    const updatedVotes = currentVotes.includes(currentUser.id)
+      ? currentVotes
+      : [...currentVotes, currentUser.id];
+
+    const totalCount = Math.max(1, members.length);
+
+    if (updatedVotes.length >= totalCount) {
+      // Consensus reached! Permanently remove from workspace
+      setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    } else {
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, deleteVotes: updatedVotes } : f))
+      );
+    }
+
+    const res = await votePermanentDeleteOnServer(room.code, fileId, currentUser);
+    if (res?.permanentlyDeleted) {
+      setFiles((prev) => prev.filter((f) => f.id !== fileId));
     }
   };
 
@@ -231,11 +340,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
                 activeFileId={activeFileId}
                 onSelectFile={handleSelectFile}
                 onCreateFile={handleCreateFile}
-                onDeleteFile={handleDeleteFile}
+                onDeleteFile={handleRecycleFile}
+                onRestoreFile={handleRestoreFile}
+                onVotePermanentDelete={handleVotePermanentDelete}
+                totalMembers={members.length}
+                currentUserId={currentUser.id}
               />
             )}
             {activeSidebar === 'search' && (
-              <SearchPanel files={files} onSelectFile={handleSelectFile} />
+              <SearchPanel files={activeFiles} onSelectFile={handleSelectFile} />
             )}
             {activeSidebar === 'members' && (
               <MembersPanel
@@ -257,7 +370,14 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         )}
 
         {/* Monaco Editor Container */}
-        <div className="flex-1 flex flex-col bg-[#1e1e1e] overflow-hidden">
+        <div className="flex-1 flex flex-col bg-[#1e1e1e] overflow-hidden relative">
+          {syncNotice && (
+            <div className="absolute top-11 right-4 z-50 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2 shadow-xl backdrop-blur animate-fade-in font-medium">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              <span>{syncNotice}</span>
+            </div>
+          )}
+
           <TabBar
             openFiles={openFiles}
             activeFileId={activeFileId}
@@ -265,6 +385,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
             canRedo={canRedo}
             onUndo={undo}
             onRedo={redo}
+            onSaveFile={handleSaveFile}
             onSelectTab={handleSelectFile}
             onCloseTab={handleCloseTab}
           />

@@ -18,6 +18,93 @@ interface UseRoomCollabOptions {
   editor: monacoEditor.editor.IStandaloneCodeEditor | null;
 }
 
+/**
+ * Deduplicates concurrent identical line insertions or intra-line duplicate statements.
+ * If user A (online) and user B (offline) made the same edits on a line, this eliminates
+ * the duplicate copies and identifies line numbers that were synced/reconciled.
+ */
+function deduplicateAndReconcile(
+  content: string,
+  baselineContent?: string | null
+): {
+  deduped: string;
+  hasDuplicates: boolean;
+  affectedLines: number[];
+} {
+  const lines = content.split('\n');
+  const result: string[] = [];
+  const affectedLines: number[] = [];
+  let hasDuplicates = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Check intra-line duplicate: e.g. "const x = 1;const x = 1;"
+    const trimmed = line.trim();
+    if (trimmed.length >= 6 && trimmed.length % 2 === 0) {
+      const halfLen = trimmed.length / 2;
+      const first = trimmed.slice(0, halfLen);
+      const second = trimmed.slice(halfLen);
+      if (first === second) {
+        const leadingSpaces = line.match(/^\s*/)?.[0] || '';
+        line = leadingSpaces + first;
+        hasDuplicates = true;
+        affectedLines.push(result.length + 1);
+      }
+    }
+
+    // Check consecutive identical duplicate lines (e.g. line inserted twice concurrently)
+    if (result.length > 0) {
+      const prevLine = result[result.length - 1];
+      if (line.trim().length > 0 && line === prevLine) {
+        hasDuplicates = true;
+        affectedLines.push(result.length); // 1-based index of retained line
+        continue; // Skip the duplicate copy!
+      }
+    }
+
+    result.push(line);
+  }
+
+  // Also check 2-line block duplicate
+  const finalLines: string[] = [];
+  for (let i = 0; i < result.length; i++) {
+    if (
+      i + 3 < result.length &&
+      result[i].trim().length > 0 &&
+      result[i] === result[i + 2] &&
+      result[i + 1] === result[i + 3]
+    ) {
+      finalLines.push(result[i]);
+      finalLines.push(result[i + 1]);
+      affectedLines.push(finalLines.length - 1, finalLines.length);
+      i += 3;
+      hasDuplicates = true;
+      continue;
+    }
+    finalLines.push(result[i]);
+  }
+
+  const finalOutput = finalLines.join('\n');
+
+  // Also if baseline was provided, detect any lines that changed between baseline and merged output
+  if (baselineContent) {
+    const baselineLines = baselineContent.split('\n');
+    const outLines = finalOutput.split('\n');
+    for (let i = 0; i < outLines.length; i++) {
+      if (outLines[i] !== baselineLines[i] && outLines[i].trim().length > 0) {
+        affectedLines.push(i + 1);
+      }
+    }
+  }
+
+  return {
+    deduped: finalOutput,
+    hasDuplicates,
+    affectedLines: Array.from(new Set(affectedLines)).sort((a, b) => a - b),
+  };
+}
+
 export function useRoomCollab({
   roomCode,
   activeFileId,
@@ -30,9 +117,15 @@ export function useRoomCollab({
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
   // Track known members across sessions
   const knownMembersRef = useRef<Map<string, RoomMember>>(new Map());
+
+  // Offline reconciliation tracking
+  const wasOfflineRef = useRef<boolean>(false);
+  const offlineBaselineTextRef = useRef<string | null>(null);
+  const decorationsRef = useRef<any>(null);
 
   // Refs for cleanup and stable callbacks
   const ydocRef = useRef<Y.Doc | null>(null);
@@ -40,6 +133,67 @@ export function useRoomCollab({
   const indexeddbRef = useRef<IndexeddbPersistence | null>(null);
   const bindingRef = useRef<MonacoBinding | null>(null);
   const undoManagerRef = useRef<Y.UndoManager | null>(null);
+
+  // Function to apply semi-transparent yellow highlight to synced lines in Monaco
+  const applyYellowHighlights = useCallback(
+    (ed: monacoEditor.editor.IStandaloneCodeEditor, lines: number[]) => {
+      try {
+        const model = ed.getModel();
+        if (!model) return;
+
+        const maxLine = model.getLineCount();
+        const validLines = lines.filter((l) => l >= 1 && l <= maxLine);
+        if (validLines.length === 0) return;
+
+        const newDecorations = validLines.map((lineNumber) => ({
+          range: {
+            startLineNumber: lineNumber,
+            startColumn: 1,
+            endLineNumber: lineNumber,
+            endColumn: model.getLineMaxColumn(lineNumber),
+          },
+          options: {
+            isWholeLine: true,
+            className: 'hostelcode-offline-sync-highlight',
+            overviewRuler: {
+              color: '#EAB308',
+              position: 4, // OverviewRulerLane.Right
+            },
+            hoverMessage: {
+              value: '⚡ **Synced from Offline User**: Changes merged cleanly without duplicate text.',
+            },
+          },
+        }));
+
+        if ((ed as any).createDecorationsCollection) {
+          if (decorationsRef.current) {
+            decorationsRef.current.clear();
+          }
+          decorationsRef.current = (ed as any).createDecorationsCollection(newDecorations);
+        } else {
+          (ed as any)._offlineDecs = ed.deltaDecorations(
+            (ed as any)._offlineDecs || [],
+            newDecorations
+          );
+        }
+
+        // Highlight stays visible for 20 seconds for clear collaborator visibility
+        setTimeout(() => {
+          try {
+            if (decorationsRef.current) {
+              decorationsRef.current.clear();
+              decorationsRef.current = null;
+            } else if ((ed as any)._offlineDecs) {
+              (ed as any)._offlineDecs = ed.deltaDecorations((ed as any)._offlineDecs, []);
+            }
+          } catch {}
+        }, 20000);
+      } catch (err) {
+        console.warn('[Collab] Failed to apply yellow highlight:', err);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (!roomCode || !activeFileId) return;
@@ -77,12 +231,49 @@ export function useRoomCollab({
       },
       onSynced() {
         setConnectionStatus('online');
+
+        // Check if we just reconnected from being offline, or if document has duplicate lines to reconcile
+        const yText = ydoc.getText('monaco');
+        const currentContent = yText.toString();
+
+        if (wasOfflineRef.current || currentContent.length > 0) {
+          const { deduped, hasDuplicates, affectedLines } = deduplicateAndReconcile(
+            currentContent,
+            offlineBaselineTextRef.current
+          );
+
+          if (hasDuplicates) {
+            ydoc.transact(() => {
+              yText.delete(0, yText.length);
+              yText.insert(0, deduped);
+            }, 'reconciliation');
+          }
+
+          if (affectedLines.length > 0 && editor) {
+            applyYellowHighlights(editor, affectedLines);
+            setSyncNotice(
+              `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
+            );
+            setTimeout(() => setSyncNotice(null), 8000);
+          }
+        }
+
+        wasOfflineRef.current = false;
+        offlineBaselineTextRef.current = null;
       },
       onDisconnect() {
         setConnectionStatus('offline');
+        wasOfflineRef.current = true;
+        if (ydocRef.current) {
+          offlineBaselineTextRef.current = ydocRef.current.getText('monaco').toString();
+        }
       },
       onClose() {
         setConnectionStatus('offline');
+        wasOfflineRef.current = true;
+        if (ydocRef.current) {
+          offlineBaselineTextRef.current = ydocRef.current.getText('monaco').toString();
+        }
       },
       onAuthenticationFailed({ reason }) {
         console.error('[Hocuspocus Auth Failed]', reason);
@@ -233,11 +424,15 @@ export function useRoomCollab({
         bindingRef.current.destroy();
         bindingRef.current = null;
       }
+      if (decorationsRef.current) {
+        decorationsRef.current.clear();
+        decorationsRef.current = null;
+      }
       provider.destroy();
       indexeddb.destroy();
       ydoc.destroy();
     };
-  }, [roomCode, activeFileId, currentUser.id, editor]);
+  }, [roomCode, activeFileId, currentUser.id, editor, applyYellowHighlights]);
 
   // Scoped undo method: undos ONLY current user's edits
   const handleUndo = useCallback(() => {
@@ -260,6 +455,7 @@ export function useRoomCollab({
     canRedo,
     undo: handleUndo,
     redo: handleRedo,
+    syncNotice,
     ydoc: ydocRef.current,
     provider: providerRef.current,
   };

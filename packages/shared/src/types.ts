@@ -78,7 +78,7 @@ export type SupportedLanguage =
   | 'markdown';
 
 /**
- * Project file metadata
+ * Project file metadata with Recycle Bin and Permanent Deletion Consensus
  */
 export interface ProjectFile {
   id: string;
@@ -87,6 +87,10 @@ export interface ProjectFile {
   path: string;
   language: SupportedLanguage;
   content: string;
+  isRecycled?: boolean;
+  recycledBy?: string;
+  recycledAt?: string;
+  deleteVotes?: string[]; // Array of user IDs who marked for permanent deletion
   createdAt: string;
   updatedAt: string;
 }

@@ -28,3 +28,10 @@ html, body, #root {
 ::-webkit-scrollbar-thumb:hover {
   background: #4f4f4f;
 }
+
+/* Semi-transparent yellow highlight for code synced from offline user */
+.hostelcode-offline-sync-highlight {
+  background-color: rgba(234, 179, 8, 0.28) !important;
+  border-left: 3px solid #eab308 !important;
+}
+

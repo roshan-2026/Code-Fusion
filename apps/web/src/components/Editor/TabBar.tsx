@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Undo2, Redo2 } from 'lucide-react';
+import { X, Undo2, Redo2, Download } from 'lucide-react';
 import { FileIcon } from '../FileIcon';
 import type { WorkspaceFile } from '../../types/workspace';
 
@@ -10,6 +10,7 @@ interface TabBarProps {
   canRedo?: boolean;
   onUndo?: () => void;
   onRedo?: () => void;
+  onSaveFile?: () => void;
   onSelectTab: (fileId: string) => void;
   onCloseTab: (fileId: string) => void;
 }
@@ -21,6 +22,7 @@ export const TabBar: React.FC<TabBarProps> = ({
   canRedo = false,
   onUndo,
   onRedo,
+  onSaveFile,
   onSelectTab,
   onCloseTab,
 }) => {
@@ -62,8 +64,20 @@ export const TabBar: React.FC<TabBarProps> = ({
         )}
       </div>
 
-      {/* Per-User Undo & Redo Actions */}
-      <div className="flex items-center gap-1 px-2 border-l border-[#3c3c3c] shrink-0 bg-[#252526]">
+      {/* Actions: Save File & Per-User Undo & Redo */}
+      <div className="flex items-center gap-1.5 px-2 border-l border-[#3c3c3c] shrink-0 bg-[#252526]">
+        {onSaveFile && (
+          <button
+            onClick={onSaveFile}
+            disabled={!activeFileId}
+            title="Download / Save file locally (Ctrl+S)"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 hover:text-white border border-indigo-500/30 transition-colors disabled:opacity-30 disabled:hover:bg-indigo-600/20"
+          >
+            <Download className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="hidden sm:inline text-[11px] font-mono font-medium">Save File</span>
+          </button>
+        )}
+
         <button
           onClick={onUndo}
           disabled={!canUndo}

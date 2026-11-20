@@ -10,6 +10,9 @@ import {
   getRoomMembers,
   saveRoomFiles,
   deleteRoomFile,
+  recycleRoomFile,
+  restoreRoomFile,
+  votePermanentDeleteFile,
 } from './persistence/database.js';
 import type { HealthCheckResponse, Room, ProjectFile } from '@hostelcode/shared';
 
@@ -192,6 +195,70 @@ const httpServer = http.createServer(async (req, res) => {
 
     deleteRoomFile(roomCode, fileId);
     sendJson(res, 200, { success: true });
+    return;
+  }
+
+  // 7. POST /api/rooms/:code/files/:fileId/recycle — Move file to Recycle Bin
+  const recycleMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/files\/([^/]+)\/recycle$/);
+  if (recycleMatch && req.method === 'POST') {
+    const roomCode = recycleMatch[1].toUpperCase();
+    const fileId = recycleMatch[2];
+    const userId = (req.headers['x-user-id'] as string) || url.searchParams.get('user_id');
+
+    if (!userId || !isUserMemberOfRoom(roomCode, userId)) {
+      sendJson(res, 403, { error: 'Access Denied: You are not authorized to recycle files in this room' });
+      return;
+    }
+
+    try {
+      const body = await parseJsonBody<{ userName?: string }>(req);
+      recycleRoomFile(roomCode, fileId, userId, body.userName || 'Member');
+      sendJson(res, 200, { success: true, room: getRoom(roomCode) });
+    } catch (err: any) {
+      sendJson(res, 400, { error: err.message || 'Failed to recycle file' });
+    }
+    return;
+  }
+
+  // 8. POST /api/rooms/:code/files/:fileId/restore — Restore file from Recycle Bin
+  const restoreMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/files\/([^/]+)\/restore$/);
+  if (restoreMatch && req.method === 'POST') {
+    const roomCode = restoreMatch[1].toUpperCase();
+    const fileId = restoreMatch[2];
+    const userId = (req.headers['x-user-id'] as string) || url.searchParams.get('user_id');
+
+    if (!userId || !isUserMemberOfRoom(roomCode, userId)) {
+      sendJson(res, 403, { error: 'Access Denied: You are not authorized to restore files in this room' });
+      return;
+    }
+
+    try {
+      restoreRoomFile(roomCode, fileId);
+      sendJson(res, 200, { success: true, room: getRoom(roomCode) });
+    } catch (err: any) {
+      sendJson(res, 400, { error: err.message || 'Failed to restore file' });
+    }
+    return;
+  }
+
+  // 9. POST /api/rooms/:code/files/:fileId/delete-vote — Vote for permanent deletion by consensus
+  const voteMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/files\/([^/]+)\/delete-vote$/);
+  if (voteMatch && req.method === 'POST') {
+    const roomCode = voteMatch[1].toUpperCase();
+    const fileId = voteMatch[2];
+    const userId = (req.headers['x-user-id'] as string) || url.searchParams.get('user_id');
+
+    if (!userId || !isUserMemberOfRoom(roomCode, userId)) {
+      sendJson(res, 403, { error: 'Access Denied: You are not authorized to vote on file deletion in this room' });
+      return;
+    }
+
+    try {
+      const result = votePermanentDeleteFile(roomCode, fileId, userId);
+      sendJson(res, 200, { success: true, ...result, room: getRoom(roomCode) });
+    } catch (err: any) {
+      sendJson(res, 400, { error: err.message || 'Failed to record delete vote' });
+    }
     return;
   }
 

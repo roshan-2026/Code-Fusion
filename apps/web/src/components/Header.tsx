@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Code2, ArrowLeft, Copy, Check, Share2, Users, Wifi, WifiOff } from 'lucide-react';
+import { Code2, ArrowLeft, Copy, Check, Users, Wifi, WifiOff } from 'lucide-react';
 import { HealthStatus } from './HealthStatus';
 import type { AuthUser, ConnectionStatus, RoomMember } from '@hostelcode/shared';
 
@@ -25,21 +25,12 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAuth,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
 
   const handleCopyCode = () => {
     if (!roomCode) return;
     navigator.clipboard.writeText(roomCode);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
-  };
-
-  const handleCopyLink = () => {
-    if (!roomCode) return;
-    const url = `${window.location.origin}/?room=${roomCode}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   const onlineCount = members.filter((m) => m.isOnline).length;
@@ -85,17 +76,6 @@ export const Header: React.FC<HeaderProps> = ({
                 <Check className="w-3.5 h-3.5 text-emerald-400" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
-              )}
-            </button>
-            <button
-              onClick={handleCopyLink}
-              title="Copy Direct Share Link"
-              className="p-1 hover:text-white text-neutral-400 hover:bg-[#333333] rounded"
-            >
-              {copiedLink ? (
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <Share2 className="w-3.5 h-3.5" />
               )}
             </button>
           </div>

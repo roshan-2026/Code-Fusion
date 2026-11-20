@@ -61,12 +61,6 @@ export const HealthStatus: React.FC = () => {
         </span>
       </div>
 
-      {health && (
-        <span className="text-neutral-400 hidden sm:inline">
-          | {health.metrics?.activeConnections ?? 0} peers | uptime: {health.uptimeSeconds}s
-        </span>
-      )}
-
       {error && (
         <span className="text-rose-400 text-[11px] truncate max-w-[150px]" title={error}>
           ({error})

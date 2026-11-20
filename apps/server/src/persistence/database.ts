@@ -51,6 +51,10 @@ db.exec(`
     path TEXT NOT NULL,
     language TEXT NOT NULL,
     content TEXT NOT NULL,
+    is_recycled INTEGER DEFAULT 0,
+    recycled_by TEXT,
+    recycled_at TEXT,
+    delete_votes TEXT DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (room_code) REFERENCES rooms(code) ON DELETE CASCADE
@@ -63,6 +67,20 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 `);
+
+// Safe migrations for Recycle Bin columns
+try {
+  db.exec(`ALTER TABLE room_files ADD COLUMN is_recycled INTEGER DEFAULT 0;`);
+} catch {}
+try {
+  db.exec(`ALTER TABLE room_files ADD COLUMN recycled_by TEXT;`);
+} catch {}
+try {
+  db.exec(`ALTER TABLE room_files ADD COLUMN recycled_at TEXT;`);
+} catch {}
+try {
+  db.exec(`ALTER TABLE room_files ADD COLUMN delete_votes TEXT DEFAULT '[]';`);
+} catch {}
 
 console.log(`[HostelCode Database] SQLite initialized securely at: ${dbPath}`);
 
@@ -172,13 +190,38 @@ export function getRoom(roomCode: string): Room | null {
   if (!roomRow) return null;
 
   const filesStmt = db.prepare(`
-    SELECT id, room_code as projectId, name, path, language, content, created_at as createdAt, updated_at as updatedAt
+    SELECT id, room_code as projectId, name, path, language, content,
+           is_recycled as isRecycled, recycled_by as recycledBy,
+           recycled_at as recycledAt, delete_votes as deleteVotes,
+           created_at as createdAt, updated_at as updatedAt
     FROM room_files
     WHERE room_code = ?
     ORDER BY created_at ASC
   `);
 
-  const fileRows = filesStmt.all(cleanCode) as unknown as ProjectFile[];
+  const rawRows = filesStmt.all(cleanCode) as any[];
+  const fileRows: ProjectFile[] = rawRows.map((r) => {
+    let votes: string[] = [];
+    try {
+      votes = typeof r.deleteVotes === 'string' ? JSON.parse(r.deleteVotes) : r.deleteVotes || [];
+    } catch {
+      votes = [];
+    }
+    return {
+      id: r.id,
+      projectId: r.projectId,
+      name: r.name,
+      path: r.path,
+      language: r.language,
+      content: r.content,
+      isRecycled: Boolean(r.isRecycled),
+      recycledBy: r.recycledBy || undefined,
+      recycledAt: r.recycledAt || undefined,
+      deleteVotes: votes,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  });
 
   return {
     code: roomRow.code,
@@ -198,13 +241,17 @@ export function getRoom(roomCode: string): Room | null {
 export function saveRoomFiles(roomCode: string, files: ProjectFile[]): void {
   const cleanCode = roomCode.toUpperCase();
   const insertStmt = db.prepare(`
-    INSERT INTO room_files (id, room_code, name, path, language, content, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO room_files (id, room_code, name, path, language, content, is_recycled, recycled_by, recycled_at, delete_votes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       path = excluded.path,
       language = excluded.language,
       content = excluded.content,
+      is_recycled = excluded.is_recycled,
+      recycled_by = excluded.recycled_by,
+      recycled_at = excluded.recycled_at,
+      delete_votes = excluded.delete_votes,
       updated_at = excluded.updated_at
   `);
 
@@ -216,6 +263,10 @@ export function saveRoomFiles(roomCode: string, files: ProjectFile[]): void {
       f.path,
       f.language,
       f.content || '',
+      f.isRecycled ? 1 : 0,
+      f.recycledBy || null,
+      f.recycledAt || null,
+      JSON.stringify(f.deleteVotes || []),
       f.createdAt || new Date().toISOString(),
       f.updatedAt || new Date().toISOString()
     );
@@ -223,14 +274,138 @@ export function saveRoomFiles(roomCode: string, files: ProjectFile[]): void {
 }
 
 /**
- * Deletes a file from a room
+ * Moves a file to the Recycle Bin
+ */
+export function recycleRoomFile(
+  roomCode: string,
+  fileId: string,
+  userId: string,
+  userName: string
+): void {
+  const stmt = db.prepare(`
+    UPDATE room_files
+    SET is_recycled = 1,
+        recycled_by = ?,
+        recycled_at = ?,
+        delete_votes = ?,
+        updated_at = ?
+    WHERE room_code = ? AND id = ?
+  `);
+  stmt.run(
+    userName,
+    new Date().toISOString(),
+    JSON.stringify([userId]),
+    new Date().toISOString(),
+    roomCode.toUpperCase(),
+    fileId
+  );
+}
+
+/**
+ * Restores a file from the Recycle Bin back to active project files
+ */
+export function restoreRoomFile(roomCode: string, fileId: string): void {
+  const stmt = db.prepare(`
+    UPDATE room_files
+    SET is_recycled = 0,
+        recycled_by = NULL,
+        recycled_at = NULL,
+        delete_votes = '[]',
+        updated_at = ?
+    WHERE room_code = ? AND id = ?
+  `);
+  stmt.run(new Date().toISOString(), roomCode.toUpperCase(), fileId);
+}
+
+/**
+ * Permanently deletes a file and its updates from database
  */
 export function deleteRoomFile(roomCode: string, fileId: string): void {
-  const stmt = db.prepare(`
+  const cleanCode = roomCode.toUpperCase();
+  const delStmt = db.prepare(`
     DELETE FROM room_files
     WHERE room_code = ? AND id = ?
   `);
-  stmt.run(roomCode.toUpperCase(), fileId);
+  delStmt.run(cleanCode, fileId);
+
+  const docName = `project:${cleanCode}:file:${fileId}`;
+  const delDocStmt = db.prepare(`
+    DELETE FROM document_updates
+    WHERE doc_name = ?
+  `);
+  delDocStmt.run(docName);
+}
+
+/**
+ * Records a user's vote to delete a recycled file permanently.
+ * If ALL joined room members have voted, the file is permanently deleted from SQLite database!
+ */
+export function votePermanentDeleteFile(
+  roomCode: string,
+  fileId: string,
+  userId: string
+): { permanentlyDeleted: boolean; votes: string[]; totalMembers: number } {
+  const cleanCode = roomCode.toUpperCase();
+  const fileStmt = db.prepare(`
+    SELECT delete_votes FROM room_files
+    WHERE room_code = ? AND id = ?
+  `);
+  const fileRow = fileStmt.get(cleanCode, fileId) as any;
+  if (!fileRow) {
+    return { permanentlyDeleted: true, votes: [], totalMembers: 0 };
+  }
+
+  let votes: string[] = [];
+  try {
+    votes = JSON.parse(fileRow.delete_votes || '[]');
+  } catch {
+    votes = [];
+  }
+
+  if (!votes.includes(userId)) {
+    votes.push(userId);
+  }
+
+  // Count total joined room members
+  const memberCountStmt = db.prepare(`
+    SELECT COUNT(*) as count FROM room_members
+    WHERE room_code = ?
+  `);
+  const memberCountRow = memberCountStmt.get(cleanCode) as any;
+  const totalMembers = memberCountRow ? memberCountRow.count : 1;
+
+  // If EACH user in the room has marked/voted to permanently delete:
+  if (votes.length >= totalMembers) {
+    // Delete file from database permanently!
+    const delStmt = db.prepare(`
+      DELETE FROM room_files
+      WHERE room_code = ? AND id = ?
+    `);
+    delStmt.run(cleanCode, fileId);
+
+    // Also remove any Yjs document snapshot
+    const docName = `project:${cleanCode}:file:${fileId}`;
+    const delDocStmt = db.prepare(`
+      DELETE FROM document_updates
+      WHERE doc_name = ?
+    `);
+    delDocStmt.run(docName);
+
+    console.log(
+      `[Database Security] File ${fileId} in room ${cleanCode} permanently deleted by consensus of all ${totalMembers} members.`
+    );
+    return { permanentlyDeleted: true, votes, totalMembers };
+  }
+
+  // Otherwise, update votes array in database
+  const updateStmt = db.prepare(`
+    UPDATE room_files
+    SET delete_votes = ?, updated_at = ?
+    WHERE room_code = ? AND id = ?
+  `);
+  updateStmt.run(JSON.stringify(votes), new Date().toISOString(), cleanCode, fileId);
+
+  return { permanentlyDeleted: false, votes, totalMembers };
 }
 
 /**

@@ -160,3 +160,87 @@ export function updateRoomFilesLocally(roomCode: string, files: ProjectFile[], u
     });
   }
 }
+
+/**
+ * Moves a file to the Recycle Bin on the server
+ */
+export async function recycleFileOnServer(
+  roomCode: string,
+  fileId: string,
+  user: AuthUser
+): Promise<boolean> {
+  const cleanCode = roomCode.toUpperCase();
+  try {
+    const res = await fetch(
+      `${config.serverHttpUrl}/api/rooms/${cleanCode}/files/${encodeURIComponent(fileId)}/recycle`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': user.id,
+        },
+        body: JSON.stringify({ userName: user.name }),
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to recycle file on server (offline):', err);
+    return false;
+  }
+}
+
+/**
+ * Restores a file from the Recycle Bin on the server
+ */
+export async function restoreFileOnServer(
+  roomCode: string,
+  fileId: string,
+  user: AuthUser
+): Promise<boolean> {
+  const cleanCode = roomCode.toUpperCase();
+  try {
+    const res = await fetch(
+      `${config.serverHttpUrl}/api/rooms/${cleanCode}/files/${encodeURIComponent(fileId)}/restore`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': user.id,
+        },
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to restore file on server (offline):', err);
+    return false;
+  }
+}
+
+/**
+ * Records a user's vote for permanent deletion of a recycled file
+ */
+export async function votePermanentDeleteOnServer(
+  roomCode: string,
+  fileId: string,
+  user: AuthUser
+): Promise<{ permanentlyDeleted: boolean; votes: string[]; totalMembers: number } | null> {
+  const cleanCode = roomCode.toUpperCase();
+  try {
+    const res = await fetch(
+      `${config.serverHttpUrl}/api/rooms/${cleanCode}/files/${encodeURIComponent(fileId)}/delete-vote`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': user.id,
+        },
+      }
+    );
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to cast delete vote on server (offline):', err);
+  }
+  return null;
+}

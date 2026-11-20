@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Users, Crown, Copy, Check, Share2, Wifi, WifiOff } from 'lucide-react';
+import { Users, Crown, Copy, Check, Wifi, WifiOff } from 'lucide-react';
 import type { RoomMember } from '@hostelcode/shared';
 
 interface MembersPanelProps {
@@ -16,19 +16,11 @@ export const MembersPanel: React.FC<MembersPanelProps> = ({
   members,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
 
   const handleCopyCode = () => {
     navigator.clipboard.writeText(roomCode);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
-  };
-
-  const handleCopyLink = () => {
-    const url = `${window.location.origin}/?room=${roomCode}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   const onlineMembers = members.filter((m) => m.isOnline);
@@ -71,17 +63,6 @@ export const MembersPanel: React.FC<MembersPanelProps> = ({
                 <Check className="w-3.5 h-3.5 text-emerald-400" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
-              )}
-            </button>
-            <button
-              onClick={handleCopyLink}
-              title="Copy Direct Share Link"
-              className="p-1 hover:text-white hover:bg-[#333333] text-neutral-400 rounded transition-colors"
-            >
-              {copiedLink ? (
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <Share2 className="w-3.5 h-3.5" />
               )}
             </button>
           </div>

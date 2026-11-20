@@ -7,6 +7,10 @@ export interface WorkspaceFile {
   language: SupportedLanguage;
   content: string;
   isModified?: boolean;
+  isRecycled?: boolean;
+  recycledBy?: string;
+  recycledAt?: string;
+  deleteVotes?: string[];
 }
 
 export type SidebarView = 'explorer' | 'search' | 'members' | 'settings';

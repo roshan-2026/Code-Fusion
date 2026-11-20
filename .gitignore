@@ -35,3 +35,10 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Local SQLite databases
+apps/server/data/
+*.db
+*.db-shm
+*.db-wal
+
