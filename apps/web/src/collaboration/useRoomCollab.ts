@@ -382,26 +382,87 @@ export function useRoomCollab({
       initialFiles.find((f) => f.id === activeFileId);
     const seedContent = targetFile?.content || initialContent;
 
-    const initYText = () => {
+    let hasSeeded = false;
+    const seedIfEmpty = () => {
+      if (hasSeeded) return;
       const yText = fileDoc.getText('monaco');
+      // Only seed if doc has 0 length after IndexedDB/provider sync has delivered data
       if (yText.length === 0 && seedContent) {
         fileDoc.transact(() => {
           if (yText.length === 0) {
             yText.insert(0, seedContent);
           }
         }, 'initialization');
+        hasSeeded = true;
+      } else if (yText.length > 0) {
+        hasSeeded = true;
       }
     };
 
-    // Initialize immediately so Monaco doesn't see an empty buffer
-    initYText();
+    // Sanitize any corrupt repeated duplicate copies caused by previous buggy refreshes
+    const sanitizeDuplicatesIfCorrupted = () => {
+      const yText = fileDoc.getText('monaco');
+      const current = yText.toString();
+      if (!current || !seedContent) return;
+
+      const cleanSeed = seedContent.trim();
+      const trimmedCurrent = current.trim();
+
+      if (cleanSeed.length > 0 && trimmedCurrent.length > cleanSeed.length) {
+        let repeated = cleanSeed;
+        let isMultiple = false;
+        for (let k = 2; k <= 30; k++) {
+          repeated += '\n' + cleanSeed;
+          if (trimmedCurrent === repeated || trimmedCurrent === cleanSeed.repeat(k)) {
+            isMultiple = true;
+            break;
+          }
+        }
+
+        if (isMultiple) {
+          console.log('[Collab] Sanitized repeated duplicate copies in document history');
+          fileDoc.transact(() => {
+            yText.delete(0, yText.length);
+            yText.insert(0, seedContent);
+          }, 'clean-duplicate-history');
+          return;
+        }
+      }
+
+      // Reconcile and highlight offline edits if user was actually offline
+      if (wasOfflineRef.current) {
+        const { deduped, hasDuplicates, affectedLines } = deduplicateAndReconcile(
+          current,
+          offlineBaselineTextRef.current
+        );
+
+        if (hasDuplicates) {
+          fileDoc.transact(() => {
+            yText.delete(0, yText.length);
+            yText.insert(0, deduped);
+          }, 'reconciliation');
+        }
+
+        if (affectedLines.length > 0 && editor) {
+          applyYellowHighlights(editor, affectedLines);
+          setSyncNotice(
+            `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
+          );
+          setTimeout(() => setSyncNotice(null), 8000);
+        }
+
+        wasOfflineRef.current = false;
+        offlineBaselineTextRef.current = null;
+      }
+    };
 
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
     fileIndexeddbRef.current = fileIndexeddb;
 
     fileIndexeddb.once('synced', () => {
-      initYText();
+      seedIfEmpty();
+      sanitizeDuplicatesIfCorrupted();
     });
 
     const fileProvider = new HocuspocusProvider({
@@ -414,34 +475,8 @@ export function useRoomCollab({
         email: currentUser.email,
       }),
       onSynced() {
-        initYText();
-        const yText = fileDoc.getText('monaco');
-        const currentContent = yText.toString();
-
-        if (wasOfflineRef.current || currentContent.length > 0) {
-          const { deduped, hasDuplicates, affectedLines } = deduplicateAndReconcile(
-            currentContent,
-            offlineBaselineTextRef.current
-          );
-
-          if (hasDuplicates) {
-            fileDoc.transact(() => {
-              yText.delete(0, yText.length);
-              yText.insert(0, deduped);
-            }, 'reconciliation');
-          }
-
-          if (affectedLines.length > 0 && editor) {
-            applyYellowHighlights(editor, affectedLines);
-            setSyncNotice(
-              `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
-            );
-            setTimeout(() => setSyncNotice(null), 8000);
-          }
-        }
-
-        wasOfflineRef.current = false;
-        offlineBaselineTextRef.current = null;
+        seedIfEmpty();
+        sanitizeDuplicatesIfCorrupted();
       },
       onDisconnect() {
         wasOfflineRef.current = true;

@@ -199,7 +199,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#121212] text-neutral-200 flex flex-col font-sans overflow-x-hidden">
+    <div className="min-h-screen w-full bg-[#121212] text-neutral-200 flex flex-col font-sans">
       {/* Top Navigation */}
       <header className="h-16 border-b border-[#2d2d2d] bg-[#181818]/80 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-40">
         <div className="flex items-center gap-3">
@@ -308,51 +308,15 @@ export const HomePage: React.FC<HomePageProps> = ({
           </button>
         </div>
 
-        {/* Features highlight */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16 w-full text-left">
-          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
-            <div className="p-2 w-fit rounded-lg bg-indigo-500/10 text-indigo-400">
-              <HardDrive className="w-5 h-5" />
-            </div>
-            <h3 className="font-semibold text-white text-sm">LocalStorage Cached UI</h3>
-            <p className="text-xs text-neutral-400 leading-normal">
-              Resources and project files persist directly in your browser. No re-fetching required
-              when returning to the site.
-            </p>
-          </div>
-
-          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
-            <div className="p-2 w-fit rounded-lg bg-emerald-500/10 text-emerald-400">
-              <Wifi className="w-5 h-5" />
-            </div>
-            <h3 className="font-semibold text-white text-sm">Offline-First CRDT</h3>
-            <p className="text-xs text-neutral-400 leading-normal">
-              Keep typing when Wi-Fi drops. Yjs merges changes automatically without overwriting or
-              losing code.
-            </p>
-          </div>
-
-          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
-            <div className="p-2 w-fit rounded-lg bg-purple-500/10 text-purple-400">
-              <Users className="w-5 h-5" />
-            </div>
-            <h3 className="font-semibold text-white text-sm">Real-time Presence</h3>
-            <p className="text-xs text-neutral-400 leading-normal">
-              Track who is online vs offline in your room, with live collaborator cursors and colored
-              labels.
-            </p>
-          </div>
-        </div>
-
-        {/* Rooms Created by Current User */}
+        {/* Active Rooms Created by Current User (Prominently displayed right under actions) */}
         {currentUser && (createdRooms.length > 0 || loadingCreatedRooms) && (
-          <div className="mt-14 w-full text-left space-y-4">
+          <div className="mt-10 w-full text-left space-y-4">
             <div className="flex items-center justify-between border-b border-[#2d2d2d] pb-2">
-              <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300 flex items-center gap-2 font-mono">
+              <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-2 font-mono">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span>Rooms Created by You (Admin)</span>
+                <span>Your Active Team Rooms (Admin)</span>
               </h2>
-              <span className="text-[11px] text-neutral-500">
+              <span className="text-[11px] text-neutral-400 font-mono">
                 {createdRooms.length} Active {createdRooms.length === 1 ? 'Room' : 'Rooms'}
               </span>
             </div>
@@ -368,7 +332,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                   <div
                     key={room.code}
                     onClick={() => onEnterRoom(room.code)}
-                    className="group p-4 rounded-xl bg-[#1e1e1e] border border-indigo-500/20 hover:border-indigo-500/60 cursor-pointer transition-all hover:bg-[#242426] flex flex-col justify-between"
+                    className="group p-4 rounded-xl bg-[#1e1e1e] border border-indigo-500/30 hover:border-indigo-500/80 cursor-pointer transition-all hover:bg-[#242426] flex flex-col justify-between shadow-md"
                   >
                     <div>
                       <div className="flex items-center justify-between mb-2">
@@ -379,7 +343,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                           <button
                             onClick={(e) => handleCopyCode(room.code, e)}
                             title="Copy 6-Digit Code"
-                            className="text-neutral-500 hover:text-white p-1 rounded"
+                            className="text-neutral-400 hover:text-white p-1 rounded hover:bg-[#333333]"
                           >
                             {copiedCode === room.code ? (
                               <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -419,6 +383,42 @@ export const HomePage: React.FC<HomePageProps> = ({
             )}
           </div>
         )}
+
+        {/* Features highlight */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16 w-full text-left">
+          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
+            <div className="p-2 w-fit rounded-lg bg-indigo-500/10 text-indigo-400">
+              <HardDrive className="w-5 h-5" />
+            </div>
+            <h3 className="font-semibold text-white text-sm">LocalStorage Cached UI</h3>
+            <p className="text-xs text-neutral-400 leading-normal">
+              Resources and project files persist directly in your browser. No re-fetching required
+              when returning to the site.
+            </p>
+          </div>
+
+          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
+            <div className="p-2 w-fit rounded-lg bg-emerald-500/10 text-emerald-400">
+              <Wifi className="w-5 h-5" />
+            </div>
+            <h3 className="font-semibold text-white text-sm">Offline-First CRDT</h3>
+            <p className="text-xs text-neutral-400 leading-normal">
+              Keep typing when Wi-Fi drops. Yjs merges changes automatically without overwriting or
+              losing code.
+            </p>
+          </div>
+
+          <div className="p-5 rounded-xl bg-[#181818] border border-[#2d2d2d] space-y-2">
+            <div className="p-2 w-fit rounded-lg bg-purple-500/10 text-purple-400">
+              <Users className="w-5 h-5" />
+            </div>
+            <h3 className="font-semibold text-white text-sm">Real-time Presence</h3>
+            <p className="text-xs text-neutral-400 leading-normal">
+              Track who is online vs offline in your room, with live collaborator cursors and colored
+              labels.
+            </p>
+          </div>
+        </div>
 
         {/* Recent Cached Rooms Section */}
         {recentRooms.length > 0 && (
