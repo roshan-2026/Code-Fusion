@@ -1,0 +1,198 @@
+================================================================================
+           HOSTELCODE — STEP-BY-STEP PRODUCTION DEPLOYMENT GUIDE
+================================================================================
+
+This guide provides the exact steps to publish HostelCode live to the internet.
+
+--------------------------------------------------------------------------------
+0. WHY YOUR PREVIOUS RENDER BUILD FAILED & HOW IT WAS FIXED
+--------------------------------------------------------------------------------
+In the log you uploaded:
+  "src/config/index.ts(2,18): error TS2591: Cannot find name 'path'...
+   Try npm i --save-dev @types/node"
+
+Why this happened:
+When Render builds with `NODE_ENV=production`, standard `npm install` skips
+`devDependencies`. This meant `@types/node`, `@types/ws`, and `typescript` were
+omitted, causing `tsc -b` to fail.
+
+The Fix Applied:
+1. Moved `@types/node`, `@types/ws`, and `typescript` into direct `dependencies`
+   in `apps/server/package.json` so they are ALWAYS installed on cloud builders.
+2. Explicitly added `"types": ["node", "ws"]` in `apps/server/tsconfig.json`.
+3. Created a `render.yaml` blueprint with `--include=dev` to ensure reliable builds.
+
+================================================================================
+STEP 1: PUSH THE FIX TO YOUR GITHUB REPOSITORY
+================================================================================
+Open your terminal in the project directory (`Code Fusion`) and run:
+
+  git add .
+  git commit -m "fix: production build types and render deployment configuration"
+  git push origin main
+
+If you are using Windows PowerShell or CMD:
+  git add .
+  git commit -m "fix: production build types and render deployment configuration"
+  git push origin main
+
+Once pushed, GitHub will contain all the updated files and configuration.
+
+================================================================================
+STEP 2: DEPLOY THE COLLABORATION BACKEND ON RENDER (FREE)
+================================================================================
+The collaboration backend runs Node.js, WebSockets (for Yjs CRDT real-time sync),
+and the SQLite database for secure rooms and files.
+
+1. Go to https://render.com and sign in (or create a free account).
+
+2. In the Render Dashboard, click the blue "New +" button and choose "Web Service".
+
+3. Connect your GitHub repository:
+   - Select your repository (`Code-Fusion` / `hostelcode`).
+
+4. Configure the Web Service settings:
+   - Name: hostelcode-server (or any name you prefer)
+   - Region: Singapore / Frankfurt / Oregon (choose closest to you)
+   - Branch: main
+   - Root Directory: (Leave completely empty)
+   - Runtime: Node
+   - Build Command:
+       npm install --include=dev && npm run build:shared && npm run build:server
+   - Start Command:
+       node apps/server/dist/index.js
+   - Instance Type: Free
+
+5. Add Environment Variables (in the "Environment Variables" section):
+   -------------------------------------------------------------------------
+   KEY              VALUE
+   -------------------------------------------------------------------------
+   PORT             10000
+   HOST             0.0.0.0
+   NODE_ENV         production
+   CORS_ORIGIN      *
+   -------------------------------------------------------------------------
+
+6. Click "Deploy Web Service".
+
+7. Wait for the build to finish. Once live, Render will show:
+   "Your service is live 🎉"
+   and give you a public URL, for example:
+   https://hostelcode-server.onrender.com
+
+8. Verify your server is running:
+   Open https://hostelcode-server.onrender.com/health in your browser.
+   You will see:
+   {
+     "status": "ok",
+     "service": "HostelCode Collaboration Server",
+     "version": "0.1.0",
+     "database": "SQLite Secure WAL Store"
+   }
+
+   *** SAVE YOUR RENDER BACKEND URL ***
+   - HTTPS URL: https://hostelcode-server.onrender.com
+   - WSS URL:   wss://hostelcode-server.onrender.com  (Notice wss:// instead of https://)
+
+================================================================================
+STEP 3: DEPLOY THE WEB FRONTEND ON VERCEL (FREE)
+================================================================================
+The frontend is the React + Vite + Monaco Editor app with local storage caching.
+
+1. Go to https://vercel.com and sign in with GitHub.
+
+2. Click "Add New..." -> "Project".
+
+3. Find your `Code-Fusion` repository and click "Import".
+
+4. Configure the Project:
+   - Project Name: hostelcode (or hostelcode-web)
+   - Framework Preset: Vite
+
+   * ROOT DIRECTORY CONFIGURATION:
+     - Click "Edit" next to "Root Directory".
+     - Select: apps/web
+     - Click "Continue".
+
+   * BUILD AND OUTPUT SETTINGS (defaults are usually fine):
+     - Build Command: npm run build
+     - Output Directory: dist
+     - Install Command: npm install
+
+5. Add Environment Variables (CRITICAL STEP):
+   Expand the "Environment Variables" section and add two variables:
+
+   -------------------------------------------------------------------------
+   KEY                      VALUE
+   -------------------------------------------------------------------------
+   VITE_COLLAB_SERVER_URL   wss://hostelcode-server.onrender.com
+   VITE_SERVER_HTTP_URL     https://hostelcode-server.onrender.com
+   -------------------------------------------------------------------------
+   (Make sure to replace `hostelcode-server.onrender.com` with YOUR real
+    Render URL from Step 2!)
+
+6. Click "Deploy".
+
+7. Within 30–60 seconds, Vercel will complete the build and give you your
+   live public URL, for example:
+   https://hostelcode.vercel.app
+
+================================================================================
+STEP 4: ALTERNATIVE FRONTEND DEPLOYMENT ON NETLIFY (FREE)
+================================================================================
+If you prefer Netlify instead of Vercel:
+
+1. Go to https://app.netlify.com and log in with GitHub.
+2. Click "Add new site" -> "Import an existing project".
+3. Select your GitHub repository.
+4. Set Build Settings:
+   - Base directory: apps/web
+   - Build command: npm run build
+   - Publish directory: apps/web/dist
+5. Set Environment Variables:
+   - VITE_COLLAB_SERVER_URL = wss://your-render-url.onrender.com
+   - VITE_SERVER_HTTP_URL = https://your-render-url.onrender.com
+6. Click "Deploy hostelcode".
+
+================================================================================
+STEP 5: VERIFY LIVE COLLABORATION ACROSS MULTIPLE DEVICES
+================================================================================
+Now test your live hackathon project over the public internet:
+
+1. Device 1 (Your Laptop):
+   - Open https://hostelcode.vercel.app in your browser.
+   - Click "Login / Register" and create your account with your name and email.
+   - Click "Create Team".
+   - Give your project a name (e.g. "Hackathon Final Project").
+   - A unique 6-digit code will appear (e.g. "K9X2B7").
+   - Click "Launch Workspace".
+   - Click "Upload Files" or "+ Create File" to add files to the room.
+
+2. Device 2 (Teammate's Laptop or Your Phone):
+   - Open https://hostelcode.vercel.app on another device.
+   - Register or sign in with another name (e.g. "Rohan Sharma").
+   - Click "Join Team".
+   - Enter the 6-digit code "K9X2B7" (or click your direct invite link).
+   - Click "Join Room".
+
+3. Verify Real-Time Features:
+   - The files uploaded by Device 1 are immediately visible on Device 2!
+   - In the "Team Members" panel, both users are listed with 🟢 Active indicators.
+   - When Device 1 moves their cursor to Line 3, Device 2 sees a colored cursor
+     pointer on Line 3 with Device 1's name hovering above it!
+   - Both users can edit simultaneously — Yjs CRDT ensures zero conflicts.
+   - When Device 1 presses the "Undo" button (or Ctrl+Z), it undos ONLY Device 1's
+     edits without touching Device 2's edits!
+
+4. Verify Wi-Fi Resilience (Offline-First):
+   - Turn OFF Wi-Fi on Device 2 (Airplane mode).
+   - Connection badge switches to 🟡 Offline.
+   - Device 2 continues typing code (safely stored in browser IndexedDB/LocalStorage).
+   - Device 1 makes other edits at the same time.
+   - Turn Wi-Fi back ON on Device 2.
+   - Connection switches to 🔵 Syncing -> 🟢 Online.
+   - Edits automatically merge cleanly without conflict!
+
+================================================================================
+                           DEPLOYMENT COMPLETE!
+================================================================================
