@@ -28,12 +28,12 @@ import {
   deleteRoomOnServer,
 } from '../../lib/roomStorage';
 import type { AuthUser, Room } from '@hostelcode/shared';
-import { AuthModal } from '../Auth/AuthModal';
 
 interface HomePageProps {
   currentUser: AuthUser | null;
   onUserChange: (user: AuthUser | null) => void;
   onEnterRoom: (roomCode: string) => void;
+  onOpenAuth?: () => void;
   loadError?: string | null;
   onClearError?: () => void;
 }
@@ -42,16 +42,17 @@ export const HomePage: React.FC<HomePageProps> = ({
   currentUser,
   onUserChange,
   onEnterRoom,
+  onOpenAuth,
   loadError,
   onClearError,
 }) => {
-  const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
 
   // Create Room state
   const [newRoomName, setNewRoomName] = useState('Hackathon Project');
   const [generatedCode, setGeneratedCode] = useState(generateRoomCode());
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
 
   // Join Room state
   const [joinCode, setJoinCode] = useState('');
@@ -81,8 +82,9 @@ export const HomePage: React.FC<HomePageProps> = ({
   }, [currentUser]);
 
   const handleOpenCreate = () => {
+    if (onClearError) onClearError();
     if (!currentUser) {
-      setIsAuthOpen(true);
+      if (onOpenAuth) onOpenAuth();
       return;
     }
     setGeneratedCode(generateRoomCode());
@@ -91,8 +93,9 @@ export const HomePage: React.FC<HomePageProps> = ({
   };
 
   const handleOpenJoin = () => {
+    if (onClearError) onClearError();
     if (!currentUser) {
-      setIsAuthOpen(true);
+      if (onOpenAuth) onOpenAuth();
       return;
     }
     setJoinCode('');
@@ -103,7 +106,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
-      setIsAuthOpen(true);
+      if (onOpenAuth) onOpenAuth();
       return;
     }
 
@@ -124,8 +127,16 @@ export const HomePage: React.FC<HomePageProps> = ({
     saveRoomLocally(newRoom);
     setRecentRooms(getRecentRooms());
     setCreatedRooms((prev) => [newRoom, ...prev.filter((r) => r.code !== newRoom.code)]);
-    // Sync to secure database asynchronously
-    syncRoomToServer(newRoom, currentUser);
+
+    setIsCreatingRoom(true);
+    try {
+      // Await server sync to guarantee database persistence
+      await syncRoomToServer(newRoom, currentUser);
+    } catch (err) {
+      console.warn('Failed to sync new room to server:', err);
+    } finally {
+      setIsCreatingRoom(false);
+    }
 
     setIsCreateModalOpen(false);
     onEnterRoom(code);
@@ -134,7 +145,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   const handleJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
-      setIsAuthOpen(true);
+      if (onOpenAuth) onOpenAuth();
       return;
     }
     const cleanCode = joinCode.trim().toUpperCase();
@@ -188,7 +199,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#121212] text-neutral-200 flex flex-col font-sans select-none overflow-x-hidden">
+    <div className="min-h-screen bg-[#121212] text-neutral-200 flex flex-col font-sans overflow-x-hidden">
       {/* Top Navigation */}
       <header className="h-16 border-b border-[#2d2d2d] bg-[#181818]/80 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-40">
         <div className="flex items-center gap-3">
@@ -230,7 +241,7 @@ export const HomePage: React.FC<HomePageProps> = ({
             </div>
           ) : (
             <button
-              onClick={() => setIsAuthOpen(true)}
+              onClick={() => onOpenAuth?.()}
               className="flex items-center gap-2 px-4 py-2 bg-[#252526] hover:bg-[#333333] border border-[#3c3c3c] text-white rounded-lg text-xs font-medium transition-colors"
             >
               <LogIn className="w-4 h-4 text-indigo-400" />
@@ -518,9 +529,17 @@ export const HomePage: React.FC<HomePageProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/30"
+                  disabled={isCreatingRoom}
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
                 >
-                  Launch Workspace
+                  {isCreatingRoom ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Creating Room...</span>
+                    </>
+                  ) : (
+                    <span>Launch Workspace</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -594,15 +613,6 @@ export const HomePage: React.FC<HomePageProps> = ({
         </div>
       )}
 
-      {/* Authentication Modal */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        onSuccess={(user) => {
-          onUserChange(user);
-          setIsAuthOpen(false);
-        }}
-      />
     </div>
   );
 };

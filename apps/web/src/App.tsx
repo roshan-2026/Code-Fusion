@@ -59,6 +59,7 @@ export const App: React.FC = () => {
   };
 
   const handleEnterRoom = (roomCode: string) => {
+    setLoadError(null);
     if (!currentUser) {
       setPendingRoomCode(roomCode);
       setIsAuthOpen(true);
@@ -112,6 +113,7 @@ export const App: React.FC = () => {
         currentUser={currentUser}
         onUserChange={handleUserChange}
         onEnterRoom={handleEnterRoom}
+        onOpenAuth={() => setIsAuthOpen(true)}
         loadError={loadError}
         onClearError={() => setLoadError(null)}
       />

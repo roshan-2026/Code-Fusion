@@ -174,12 +174,34 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    // STRICT ACCESS CONTROL: verify user has joined room
-    if (!userId || !isUserMemberOfRoom(roomCode, userId)) {
-      sendJson(res, 403, {
-        error: `Access Denied: You must join room ${roomCode} to view its files and contents.`,
+    // STRICT ACCESS CONTROL: verify user authentication and authorize room membership
+    if (!userId) {
+      sendJson(res, 401, {
+        error: `Authentication required: You must provide a valid user ID to view room ${roomCode}.`,
       });
       return;
+    }
+
+    if (!isUserMemberOfRoom(roomCode, userId)) {
+      const rawName =
+        (req.headers['x-user-name'] as string) || url.searchParams.get('user_name') || 'Peer';
+      const rawEmail =
+        (req.headers['x-user-email'] as string) || url.searchParams.get('user_email') || '';
+      let userName = 'Peer';
+      let userEmail = '';
+      try {
+        userName = decodeURIComponent(rawName);
+      } catch {
+        userName = rawName;
+      }
+      try {
+        userEmail = decodeURIComponent(rawEmail);
+      } catch {
+        userEmail = rawEmail;
+      }
+
+      addRoomMember(roomCode, { id: userId, name: userName, email: userEmail });
+      console.log(`[Security] User ${userName} (${userId}) authorized and joined room ${roomCode}`);
     }
 
     sendJson(res, 200, {

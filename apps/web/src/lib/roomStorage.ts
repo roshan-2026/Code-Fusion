@@ -113,11 +113,20 @@ export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<
   const cleanCode = code.trim().toUpperCase();
 
   try {
-    // Attempt to join / authenticate membership on server first
-    await joinRoomOnServer(cleanCode, user);
+    // 1. Attempt to join / authenticate membership on server
+    const joined = await joinRoomOnServer(cleanCode, user);
+    if (joined) {
+      saveRoomLocally(joined);
+      return joined;
+    }
 
+    // 2. Fetch room with authentication headers
     const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}`, {
-      headers: { 'x-user-id': user.id },
+      headers: {
+        'x-user-id': user.id,
+        'x-user-name': encodeURIComponent(user.name),
+        'x-user-email': encodeURIComponent(user.email),
+      },
       signal: AbortSignal.timeout(3000),
     });
 
@@ -136,22 +145,35 @@ export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<
     }
   } catch (err) {
     console.warn('[RoomStorage] Server unreachable; checking local offline storage:', err);
-    // Only fall back to local room if server is actually completely unreachable (offline)
     const cached = getLocalRoom(cleanCode);
     if (cached) return cached;
   }
+
+  // If server is not responding, fallback to local cached room
+  const cached = getLocalRoom(cleanCode);
+  if (cached) return cached;
 
   return null;
 }
 
 /**
- * Checks if a room exists on the server without creating a fallback
+ * Checks if a room exists on the server and registers membership
  */
 export async function checkRoomExists(code: string, user: AuthUser): Promise<Room | null> {
   const cleanCode = code.trim().toUpperCase();
   try {
+    const joined = await joinRoomOnServer(cleanCode, user);
+    if (joined) {
+      saveRoomLocally(joined);
+      return joined;
+    }
+
     const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}`, {
-      headers: { 'x-user-id': user.id },
+      headers: {
+        'x-user-id': user.id,
+        'x-user-name': encodeURIComponent(user.name),
+        'x-user-email': encodeURIComponent(user.email),
+      },
       signal: AbortSignal.timeout(3000),
     });
     if (res.ok) {
