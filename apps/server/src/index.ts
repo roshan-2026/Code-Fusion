@@ -13,6 +13,8 @@ import {
   recycleRoomFile,
   restoreRoomFile,
   votePermanentDeleteFile,
+  deleteRoom,
+  getRoomsByCreator,
 } from './persistence/database.js';
 import type { HealthCheckResponse, Room, ProjectFile } from '@hostelcode/shared';
 
@@ -90,6 +92,39 @@ const httpServer = http.createServer(async (req, res) => {
       sendJson(res, 201, { success: true, room: getRoom(room.code) });
     } catch (err: any) {
       sendJson(res, 400, { error: err.message || 'Failed to create room' });
+    }
+    return;
+  }
+
+  // 2b. GET /api/users/:userId/rooms — Get all active rooms created by this user
+  const userRoomsMatch = pathname.match(/^\/api\/users\/([^/]+)\/rooms$/);
+  if (userRoomsMatch && req.method === 'GET') {
+    const userId = decodeURIComponent(userRoomsMatch[1]);
+    const rooms = getRoomsByCreator(userId);
+    sendJson(res, 200, { success: true, rooms });
+    return;
+  }
+
+  // 2c. DELETE /api/rooms/:code — Delete a room permanently (Admin only)
+  const deleteRoomMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})$/);
+  if (deleteRoomMatch && req.method === 'DELETE') {
+    const roomCode = deleteRoomMatch[1].toUpperCase();
+    const userId = (req.headers['x-user-id'] as string) || url.searchParams.get('user_id');
+
+    if (!userId) {
+      sendJson(res, 401, { error: 'Authentication required: missing x-user-id header' });
+      return;
+    }
+
+    try {
+      const success = deleteRoom(roomCode, userId);
+      if (success) {
+        sendJson(res, 200, { success: true, message: `Room ${roomCode} deleted permanently` });
+      } else {
+        sendJson(res, 404, { error: `Room ${roomCode} not found` });
+      }
+    } catch (err: any) {
+      sendJson(res, 403, { error: err.message || 'Failed to delete room' });
     }
     return;
   }

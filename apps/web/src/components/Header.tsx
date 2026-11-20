@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Code2, ArrowLeft, Copy, Check, Users, Wifi, WifiOff } from 'lucide-react';
+import { Code2, ArrowLeft, Copy, Check, Users, Wifi, WifiOff, Trash2 } from 'lucide-react';
 import { HealthStatus } from './HealthStatus';
 import type { AuthUser, ConnectionStatus, RoomMember } from '@hostelcode/shared';
 
@@ -9,9 +9,11 @@ interface HeaderProps {
   connectionStatus?: ConnectionStatus;
   members?: RoomMember[];
   currentUser: AuthUser | null;
+  isAdmin?: boolean;
   onLeaveRoom?: () => void;
   onOpenMembers?: () => void;
   onOpenAuth?: () => void;
+  onDeleteRoom?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -20,9 +22,11 @@ export const Header: React.FC<HeaderProps> = ({
   connectionStatus = 'offline',
   members = [],
   currentUser,
+  isAdmin,
   onLeaveRoom,
   onOpenMembers,
   onOpenAuth,
+  onDeleteRoom,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
 
@@ -86,6 +90,18 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="hidden lg:inline text-neutral-400 font-medium truncate max-w-[160px]">
             {roomName}
           </span>
+        )}
+
+        {/* Delete Room Button (Admin Only) */}
+        {isAdmin && onDeleteRoom && (
+          <button
+            onClick={onDeleteRoom}
+            title="Permanently Delete Room (Creator Admin Only)"
+            className="flex items-center gap-1 px-2 py-1 rounded bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 text-rose-300 hover:text-rose-100 transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+            <span className="font-medium hidden sm:inline">Delete Room</span>
+          </button>
         )}
       </div>
 

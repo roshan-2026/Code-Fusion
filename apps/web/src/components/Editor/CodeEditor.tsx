@@ -22,6 +22,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+
+    if (file.content && editor.getValue() === '') {
+      editor.setValue(file.content);
+    }
+
     if (onMountEditor) {
       onMountEditor(editor);
     }

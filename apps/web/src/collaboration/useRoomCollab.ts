@@ -375,17 +375,33 @@ export function useRoomCollab({
     const fileDoc = new Y.Doc();
     fileDocRef.current = fileDoc;
 
+    // Resolve initial seed content from shared files map, files state, or initialFiles/Content
+    const targetFile =
+      yFilesMapRef.current?.get(activeFileId) ||
+      files.find((f) => f.id === activeFileId) ||
+      initialFiles.find((f) => f.id === activeFileId);
+    const seedContent = targetFile?.content || initialContent;
+
+    const initYText = () => {
+      const yText = fileDoc.getText('monaco');
+      if (yText.length === 0 && seedContent) {
+        fileDoc.transact(() => {
+          if (yText.length === 0) {
+            yText.insert(0, seedContent);
+          }
+        }, 'initialization');
+      }
+    };
+
+    // Initialize immediately so Monaco doesn't see an empty buffer
+    initYText();
+
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
     fileIndexeddbRef.current = fileIndexeddb;
 
     fileIndexeddb.once('synced', () => {
-      const yText = fileDoc.getText('monaco');
-      if (yText.length === 0 && initialContent) {
-        fileDoc.transact(() => {
-          yText.insert(0, initialContent);
-        }, 'initialization');
-      }
+      initYText();
     });
 
     const fileProvider = new HocuspocusProvider({
@@ -398,6 +414,7 @@ export function useRoomCollab({
         email: currentUser.email,
       }),
       onSynced() {
+        initYText();
         const yText = fileDoc.getText('monaco');
         const currentContent = yText.toString();
 
@@ -552,6 +569,21 @@ export function useRoomCollab({
         yFilesMapRef.current.set(newFile.id, newFile);
       } else {
         setFiles((prev) => [...prev, newFile]);
+      }
+
+      if (newFile.content) {
+        try {
+          const fileDocName = buildDocumentName(roomCode, newFile.id);
+          const seedDoc = new Y.Doc();
+          seedDoc.getText('monaco').insert(0, newFile.content);
+          const idb = new IndexeddbPersistence(fileDocName, seedDoc);
+          idb.once('synced', () => {
+            idb.destroy();
+            seedDoc.destroy();
+          });
+        } catch (err) {
+          console.warn('[Collab] Failed to pre-seed file into IndexedDB:', err);
+        }
       }
 
       updateRoomFilesLocally(

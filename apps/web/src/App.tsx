@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { HomePage } from './components/Home/HomePage';
 import { Workspace } from './components/Workspace';
 import { getCurrentUser, setCurrentUser } from './lib/auth';
-import { fetchRoomWithCache, saveRoomLocally } from './lib/roomStorage';
+import { fetchRoomWithCache } from './lib/roomStorage';
 import type { AuthUser, Room } from '@hostelcode/shared';
 import { Loader2 } from 'lucide-react';
 import { AuthModal } from './components/Auth/AuthModal';
@@ -44,23 +44,15 @@ export const App: React.FC = () => {
         setCurrentRoom(room);
         window.history.replaceState({}, '', `/?room=${code}`);
       } else {
-        // Room not found on server or locally: create fresh room for that code
-        const fallbackRoom: Room = {
-          code,
-          name: `Team Room (${code})`,
-          creatorId: user.id,
-          creatorName: user.name,
-          creatorEmail: user.email,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          files: [], // Empty files: user creates or uploads real files
-        };
-        saveRoomLocally(fallbackRoom);
-        setCurrentRoom(fallbackRoom);
-        window.history.replaceState({}, '', `/?room=${code}`);
+        // Room does not exist on server! Do NOT create a room!
+        setLoadError(`No room available with code "${code}". Please check the 6-digit code or create a new team room.`);
+        setCurrentRoom(null);
+        window.history.replaceState({}, '', '/');
       }
     } catch (err: any) {
       setLoadError(err?.message || 'Failed to load room');
+      setCurrentRoom(null);
+      window.history.replaceState({}, '', '/');
     } finally {
       setLoading(false);
     }
@@ -104,23 +96,6 @@ export const App: React.FC = () => {
     );
   }
 
-  if (loadError) {
-    return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#121212] text-neutral-300 gap-4 p-6">
-        <div className="text-rose-400 font-semibold">{loadError}</div>
-        <button
-          onClick={() => {
-            setLoadError(null);
-            handleLeaveRoom();
-          }}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium"
-        >
-          Return to Homepage
-        </button>
-      </div>
-    );
-  }
-
   if (currentRoom && currentUser) {
     return (
       <Workspace
@@ -137,6 +112,8 @@ export const App: React.FC = () => {
         currentUser={currentUser}
         onUserChange={handleUserChange}
         onEnterRoom={handleEnterRoom}
+        loadError={loadError}
+        onClearError={() => setLoadError(null)}
       />
       <AuthModal
         isOpen={isAuthOpen}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Users,
   PlusCircle,
@@ -14,9 +14,19 @@ import {
   Copy,
   Check,
   Code2,
+  Trash2,
+  Loader2,
+  ShieldCheck,
 } from 'lucide-react';
 import { generateRoomCode, validateRoomCode } from '@hostelcode/shared';
-import { saveRoomLocally, syncRoomToServer, getRecentRooms } from '../../lib/roomStorage';
+import {
+  saveRoomLocally,
+  syncRoomToServer,
+  getRecentRooms,
+  checkRoomExists,
+  fetchUserCreatedRooms,
+  deleteRoomOnServer,
+} from '../../lib/roomStorage';
 import type { AuthUser, Room } from '@hostelcode/shared';
 import { AuthModal } from '../Auth/AuthModal';
 
@@ -24,12 +34,16 @@ interface HomePageProps {
   currentUser: AuthUser | null;
   onUserChange: (user: AuthUser | null) => void;
   onEnterRoom: (roomCode: string) => void;
+  loadError?: string | null;
+  onClearError?: () => void;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
   currentUser,
   onUserChange,
   onEnterRoom,
+  loadError,
+  onClearError,
 }) => {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -42,10 +56,29 @@ export const HomePage: React.FC<HomePageProps> = ({
   // Join Room state
   const [joinCode, setJoinCode] = useState('');
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [isCheckingRoom, setIsCheckingRoom] = useState(false);
 
   // Recent rooms from local storage
   const [recentRooms, setRecentRooms] = useState<Room[]>(() => getRecentRooms());
+  const [createdRooms, setCreatedRooms] = useState<Room[]>([]);
+  const [loadingCreatedRooms, setLoadingCreatedRooms] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+
+  // Load rooms created by current user
+  useEffect(() => {
+    if (!currentUser) {
+      setCreatedRooms([]);
+      return;
+    }
+    setLoadingCreatedRooms(true);
+    fetchUserCreatedRooms(currentUser)
+      .then((rooms) => {
+        setCreatedRooms(rooms);
+      })
+      .finally(() => {
+        setLoadingCreatedRooms(false);
+      });
+  }, [currentUser]);
 
   const handleOpenCreate = () => {
     if (!currentUser) {
@@ -90,6 +123,7 @@ export const HomePage: React.FC<HomePageProps> = ({
     // Save locally to browser immediately
     saveRoomLocally(newRoom);
     setRecentRooms(getRecentRooms());
+    setCreatedRooms((prev) => [newRoom, ...prev.filter((r) => r.code !== newRoom.code)]);
     // Sync to secure database asynchronously
     syncRoomToServer(newRoom, currentUser);
 
@@ -97,7 +131,7 @@ export const HomePage: React.FC<HomePageProps> = ({
     onEnterRoom(code);
   };
 
-  const handleJoinSubmit = (e: React.FormEvent) => {
+  const handleJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
       setIsAuthOpen(true);
@@ -109,9 +143,24 @@ export const HomePage: React.FC<HomePageProps> = ({
       return;
     }
 
+    setIsCheckingRoom(true);
     setJoinError(null);
-    setIsJoinModalOpen(false);
-    onEnterRoom(cleanCode);
+
+    try {
+      const room = await checkRoomExists(cleanCode, currentUser);
+      if (!room) {
+        setJoinError(`No room available with code "${cleanCode}". Please verify the code or create a new team room.`);
+        setIsCheckingRoom(false);
+        return;
+      }
+
+      setIsCheckingRoom(false);
+      setIsJoinModalOpen(false);
+      onEnterRoom(cleanCode);
+    } catch (err: any) {
+      setJoinError(`Unable to verify room "${cleanCode}".`);
+      setIsCheckingRoom(false);
+    }
   };
 
   const handleCopyCode = (code: string, e: React.MouseEvent) => {
@@ -119,6 +168,23 @@ export const HomePage: React.FC<HomePageProps> = ({
     navigator.clipboard.writeText(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(null), 2000);
+  };
+
+  const handleDeleteCreatedRoom = async (code: string, name: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!currentUser) return;
+    const confirmed = window.confirm(
+      `Are you sure you want to delete room "${name}" (${code}) permanently? All files and sessions will be deleted.`
+    );
+    if (!confirmed) return;
+
+    try {
+      await deleteRoomOnServer(code, currentUser);
+      setCreatedRooms((prev) => prev.filter((r) => r.code !== code));
+      setRecentRooms((prev) => prev.filter((r) => r.code !== code));
+    } catch (err) {
+      console.error('Failed to delete room:', err);
+    }
   };
 
   return (
@@ -176,6 +242,25 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       {/* Hero Section */}
       <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-12 flex flex-col items-center text-center">
+        {/* Load / Validation Error Banner */}
+        {loadError && (
+          <div className="w-full max-w-xl mx-auto mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 text-left">
+              <span className="font-bold text-rose-200 uppercase tracking-wide">Notice:</span>
+              <span>{loadError}</span>
+            </div>
+            {onClearError && (
+              <button
+                onClick={onClearError}
+                className="text-rose-400 hover:text-white p-1 rounded font-bold ml-2"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-mono mb-6">
           <Sparkles className="w-3.5 h-3.5" />
           <span>Deterministic Yjs CRDT · LocalStorage Cache · Zero Conflict</span>
@@ -247,6 +332,82 @@ export const HomePage: React.FC<HomePageProps> = ({
             </p>
           </div>
         </div>
+
+        {/* Rooms Created by Current User */}
+        {currentUser && (createdRooms.length > 0 || loadingCreatedRooms) && (
+          <div className="mt-14 w-full text-left space-y-4">
+            <div className="flex items-center justify-between border-b border-[#2d2d2d] pb-2">
+              <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300 flex items-center gap-2 font-mono">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>Rooms Created by You (Admin)</span>
+              </h2>
+              <span className="text-[11px] text-neutral-500">
+                {createdRooms.length} Active {createdRooms.length === 1 ? 'Room' : 'Rooms'}
+              </span>
+            </div>
+
+            {loadingCreatedRooms && createdRooms.length === 0 ? (
+              <div className="flex items-center gap-2 text-neutral-400 text-xs py-4">
+                <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                <span>Loading your rooms...</span>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                {createdRooms.map((room) => (
+                  <div
+                    key={room.code}
+                    onClick={() => onEnterRoom(room.code)}
+                    className="group p-4 rounded-xl bg-[#1e1e1e] border border-indigo-500/20 hover:border-indigo-500/60 cursor-pointer transition-all hover:bg-[#242426] flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-xs font-bold text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/30">
+                            {room.code}
+                          </span>
+                          <button
+                            onClick={(e) => handleCopyCode(room.code, e)}
+                            title="Copy 6-Digit Code"
+                            className="text-neutral-500 hover:text-white p-1 rounded"
+                          >
+                            {copiedCode === room.code ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Admin Delete Room Button */}
+                        <button
+                          onClick={(e) => handleDeleteCreatedRoom(room.code, room.name, e)}
+                          title="Permanently Delete This Room"
+                          className="text-neutral-500 hover:text-rose-400 p-1.5 rounded hover:bg-rose-500/10 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <h4 className="font-semibold text-white text-sm truncate">{room.name}</h4>
+                      <p className="text-[11px] text-neutral-400 mt-1 flex items-center gap-1.5">
+                        <FolderCode className="w-3.5 h-3.5 text-neutral-400" />
+                        <span>{room.files?.length || 0} files</span>
+                      </p>
+                    </div>
+
+                    <div className="mt-4 pt-2 border-t border-[#2d2d2d] flex items-center justify-between text-[11px] text-indigo-400 font-medium">
+                      <span className="group-hover:text-indigo-300 flex items-center gap-1">
+                        Open Workspace
+                        <ArrowRight className="w-3 h-3 group-hover:translate-x-1 transition-transform" />
+                      </span>
+                      <span className="text-[10px] text-emerald-400/90 font-mono">Creator</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Recent Cached Rooms Section */}
         {recentRooms.length > 0 && (
@@ -415,9 +576,17 @@ export const HomePage: React.FC<HomePageProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/30"
+                  disabled={isCheckingRoom}
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
                 >
-                  Join Room
+                  {isCheckingRoom ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Checking...</span>
+                    </>
+                  ) : (
+                    <span>Join Room</span>
+                  )}
                 </button>
               </div>
             </form>

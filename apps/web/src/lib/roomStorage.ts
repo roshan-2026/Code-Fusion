@@ -111,7 +111,6 @@ export async function syncRoomToServer(room: Room, user?: AuthUser): Promise<boo
  */
 export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<Room | null> {
   const cleanCode = code.trim().toUpperCase();
-  const cached = getLocalRoom(cleanCode);
 
   try {
     // Attempt to join / authenticate membership on server first
@@ -127,11 +126,91 @@ export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<
       saveRoomLocally(serverRoom);
       return serverRoom;
     }
+
+    if (res.status === 404) {
+      // Room does NOT exist on server! Clean up any stale local cache
+      try {
+        localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
+      } catch {}
+      return null;
+    }
   } catch (err) {
-    console.warn('[RoomStorage] Server unreachable; using local cached copy if available.');
+    console.warn('[RoomStorage] Server unreachable; checking local offline storage:', err);
+    // Only fall back to local room if server is actually completely unreachable (offline)
+    const cached = getLocalRoom(cleanCode);
+    if (cached) return cached;
   }
 
-  return cached;
+  return null;
+}
+
+/**
+ * Checks if a room exists on the server without creating a fallback
+ */
+export async function checkRoomExists(code: string, user: AuthUser): Promise<Room | null> {
+  const cleanCode = code.trim().toUpperCase();
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}`, {
+      headers: { 'x-user-id': user.id },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const room: Room = await res.json();
+      saveRoomLocally(room);
+      return room;
+    }
+  } catch (err) {
+    console.warn('[RoomStorage] Server unreachable, checking local cache:', err);
+    const cached = getLocalRoom(cleanCode);
+    if (cached) return cached;
+  }
+  return null;
+}
+
+/**
+ * Retrieves all active rooms created by the user from server and cache
+ */
+export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/users/${encodeURIComponent(user.id)}/rooms`, {
+      headers: { 'x-user-id': user.id },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.rooms)) {
+        data.rooms.forEach((r: Room) => saveRoomLocally(r));
+        return data.rooms;
+      }
+    }
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to fetch user rooms from server, using local fallback:', err);
+  }
+
+  return getRecentRooms().filter((r) => r.creatorId === user.id);
+}
+
+/**
+ * Permanently deletes a room on the server (Admin only)
+ */
+export async function deleteRoomOnServer(roomCode: string, user: AuthUser): Promise<boolean> {
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
+    const recent = getRecentRooms().filter((r) => r.code.toUpperCase() !== cleanCode);
+    localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
+  } catch {}
+
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}`, {
+      method: 'DELETE',
+      headers: { 'x-user-id': user.id },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to delete room on server:', err);
+    return false;
+  }
 }
 
 /**
@@ -141,7 +220,11 @@ export function updateRoomFilesLocally(roomCode: string, files: ProjectFile[], u
   const cleanCode = roomCode.toUpperCase();
   const room = getLocalRoom(cleanCode);
   if (room) {
-    room.files = files;
+    const existingMap = new Map((room.files || []).map((f) => [f.id, f]));
+    for (const f of files) {
+      existingMap.set(f.id, f);
+    }
+    room.files = Array.from(existingMap.values());
     room.updatedAt = new Date().toISOString();
     saveRoomLocally(room);
   }

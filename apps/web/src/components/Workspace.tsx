@@ -10,6 +10,7 @@ import { TabBar } from './Editor/TabBar';
 import { CodeEditor } from './Editor/CodeEditor';
 import { StatusBar } from './StatusBar';
 import { useRoomCollab } from '../collaboration/useRoomCollab';
+import { deleteRoomOnServer } from '../lib/roomStorage';
 import type { WorkspaceFile, SidebarView, EditorSettings } from '../types/workspace';
 import type { Room, AuthUser, SupportedLanguage } from '@hostelcode/shared';
 
@@ -198,6 +199,23 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     }
   };
 
+  const isAdmin = currentUser.id === room.creatorId;
+
+  const handleDeleteRoom = async () => {
+    if (!isAdmin) return;
+    const confirmed = window.confirm(
+      `Are you sure you want to delete room "${room.name}" (${room.code}) permanently? All files and session data will be erased for all users.`
+    );
+    if (!confirmed) return;
+
+    try {
+      await deleteRoomOnServer(room.code, currentUser);
+    } catch (err) {
+      console.error('[Room] Failed to delete room:', err);
+    }
+    onLeaveRoom();
+  };
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#181818] text-[#cccccc]">
       <Header
@@ -206,7 +224,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         connectionStatus={connectionStatus}
         members={members}
         currentUser={currentUser}
+        isAdmin={isAdmin}
         onLeaveRoom={onLeaveRoom}
+        onDeleteRoom={handleDeleteRoom}
         onOpenMembers={() => setActiveSidebar('members')}
       />
 

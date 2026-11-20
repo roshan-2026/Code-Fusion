@@ -236,6 +236,60 @@ export function getRoom(roomCode: string): Room | null {
 }
 
 /**
+ * Permanently deletes a room and all its members, files, and CRDT history (Admin only)
+ */
+export function deleteRoom(roomCode: string, userId: string): boolean {
+  const cleanCode = roomCode.toUpperCase();
+  const room = getRoom(cleanCode);
+  if (!room) return false;
+
+  if (room.creatorId !== userId) {
+    throw new Error('Unauthorized: Only the room creator (admin) can delete this room');
+  }
+
+  // Delete from rooms table (cascades to room_members and room_files via foreign keys)
+  const stmt = db.prepare(`DELETE FROM rooms WHERE code = ?`);
+  stmt.run(cleanCode);
+
+  // Delete Yjs CRDT document binary updates for this room
+  const docStmt = db.prepare(`DELETE FROM document_updates WHERE doc_name LIKE ?`);
+  docStmt.run(`%${cleanCode}%`);
+
+  console.log(`[Database] Room ${cleanCode} permanently deleted by admin ${userId}`);
+  return true;
+}
+
+/**
+ * Retrieves all active rooms created by a specific user
+ */
+export function getRoomsByCreator(creatorId: string): Room[] {
+  const stmt = db.prepare(`
+    SELECT code, name, creator_id as creatorId, creator_name as creatorName,
+           creator_email as creatorEmail, created_at as createdAt, updated_at as updatedAt
+    FROM rooms
+    WHERE creator_id = ?
+    ORDER BY updated_at DESC
+  `);
+
+  const rows = stmt.all(creatorId) as any[];
+  return rows.map((r) => {
+    const fullRoom = getRoom(r.code);
+    return (
+      fullRoom || {
+        code: r.code,
+        name: r.name,
+        creatorId: r.creatorId,
+        creatorName: r.creatorName,
+        creatorEmail: r.creatorEmail,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        files: [],
+      }
+    );
+  });
+}
+
+/**
  * Saves or updates files for a room
  */
 export function saveRoomFiles(roomCode: string, files: ProjectFile[]): void {
