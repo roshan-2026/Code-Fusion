@@ -1,0 +1,25 @@
+{
+  "name": "hostelcode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first collaborative code editor for teams on unreliable Wi-Fi",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n \"server,web\" -c \"blue,green\" \"npm run dev --workspace=@hostelcode/server\" \"npm run dev --workspace=@hostelcode/web\"",
+    "dev:server": "npm run dev --workspace=@hostelcode/server",
+    "dev:web": "npm run dev --workspace=@hostelcode/web",
+    "build:shared": "npm run build --workspace=@hostelcode/shared",
+    "build:server": "npm run build --workspace=@hostelcode/server",
+    "build:web": "npm run build --workspace=@hostelcode/web",
+    "build": "npm run build:shared && npm run build:server && npm run build:web",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}
