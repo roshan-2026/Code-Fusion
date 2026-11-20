@@ -18,13 +18,24 @@ export function updateCursorStyles(awareness: Awareness): void {
     /* Base styles for Yjs Monaco remote selections */
     .yRemoteSelection {
       background-color: rgba(99, 102, 241, 0.25);
-      position: absolute;
     }
     .yRemoteSelectionHead {
       position: absolute;
       box-sizing: border-box;
       height: 100%;
-      border-left: 2px solid #6366F1;
+      border-left: 2.5px solid #6366F1;
+      pointer-events: none;
+      z-index: 20;
+    }
+    .yRemoteSelectionHead::after {
+      position: absolute;
+      content: ' ';
+      border: 3px solid #6366F1;
+      background-color: #6366F1;
+      border-radius: 4px;
+      left: -4px;
+      top: -5px;
+      pointer-events: none;
     }
   `;
 
@@ -39,14 +50,15 @@ export function updateCursorStyles(awareness: Awareness): void {
           background-color: ${color}33 !important;
         }
         .yRemoteSelectionHead-${clientID} {
-          border-left: 2px solid ${color} !important;
-          border-top: 1px solid ${color} !important;
-          border-bottom: 1px solid ${color} !important;
+          border-left: 2.5px solid ${color} !important;
+          border-top: none !important;
+          border-bottom: none !important;
+          border-right: none !important;
         }
         .yRemoteSelectionHead-${clientID}::before {
           content: "${name}";
           position: absolute;
-          top: -1.35em;
+          top: -1.4em;
           left: -2px;
           font-size: 10px;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -57,15 +69,15 @@ export function updateCursorStyles(awareness: Awareness): void {
           border-radius: 3px;
           white-space: nowrap;
           pointer-events: none;
-          z-index: 50;
+          z-index: 100;
           line-height: normal;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
         }
         .yRemoteSelectionHead-${clientID}::after {
           position: absolute;
           content: ' ';
-          border: 3px solid ${color};
-          background-color: ${color};
+          border: 3px solid ${color} !important;
+          background-color: ${color} !important;
           border-radius: 4px;
           left: -4px;
           top: -5px;

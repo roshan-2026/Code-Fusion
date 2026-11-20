@@ -10,12 +10,6 @@ import { TabBar } from './Editor/TabBar';
 import { CodeEditor } from './Editor/CodeEditor';
 import { StatusBar } from './StatusBar';
 import { useRoomCollab } from '../collaboration/useRoomCollab';
-import {
-  updateRoomFilesLocally,
-  recycleFileOnServer,
-  restoreFileOnServer,
-  votePermanentDeleteOnServer,
-} from '../lib/roomStorage';
 import type { WorkspaceFile, SidebarView, EditorSettings } from '../types/workspace';
 import type { Room, AuthUser, SupportedLanguage } from '@hostelcode/shared';
 
@@ -26,30 +20,22 @@ interface WorkspaceProps {
 }
 
 export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeaveRoom }) => {
-  const [files, setFiles] = useState<WorkspaceFile[]>(() => {
-    if (room.files && room.files.length > 0) {
-      return room.files.map((f: any) => ({
-        id: f.id,
-        name: f.name,
-        path: f.path,
-        language: f.language,
-        content: f.content,
-        isRecycled: Boolean(f.isRecycled),
-        recycledBy: f.recycledBy,
-        recycledAt: f.recycledAt,
-        deleteVotes: Array.isArray(f.deleteVotes) ? f.deleteVotes : [],
-      }));
-    }
-    return [];
-  });
+  const initialFiles: WorkspaceFile[] = (room.files || []).map((f: any) => ({
+    id: f.id,
+    name: f.name,
+    path: f.path,
+    language: f.language,
+    content: f.content,
+    isRecycled: Boolean(f.isRecycled),
+    recycledBy: f.recycledBy,
+    recycledAt: f.recycledAt,
+    deleteVotes: Array.isArray(f.deleteVotes) ? f.deleteVotes : [],
+  }));
 
-  const activeFiles = files.filter((f) => !f.isRecycled);
-
+  const initialActive = initialFiles.find((f) => !f.isRecycled);
+  const [activeFileId, setActiveFileId] = useState<string>(() => (initialActive ? initialActive.id : ''));
   const [openFileIds, setOpenFileIds] = useState<string[]>(() =>
-    activeFiles.length > 0 ? [activeFiles[0].id] : []
-  );
-  const [activeFileId, setActiveFileId] = useState<string>(() =>
-    activeFiles.length > 0 ? activeFiles[0].id : ''
+    initialActive ? [initialActive.id] : []
   );
   const [activeSidebar, setActiveSidebar] = useState<SidebarView | null>('explorer');
   const [cursorPos, setCursorPos] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
@@ -64,14 +50,26 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     lineNumbers: 'on',
   });
 
-  const activeFile = files.find((f) => f.id === activeFileId && !f.isRecycled) || activeFiles[0];
-  const openFiles = files.filter((f) => openFileIds.includes(f.id) && !f.isRecycled);
-
-  // Connect CRDT, Presence, Per-User Undo, and Offline Sync Hook
-  const { connectionStatus, members, canUndo, canRedo, undo, redo, syncNotice } = useRoomCollab({
+  // Connect CRDT, Presence, Real-Time Files Map, and Per-User Undo Hook
+  const {
+    connectionStatus,
+    members,
+    files,
+    canUndo,
+    canRedo,
+    undo,
+    redo,
+    syncNotice,
+    createFile,
+    recycleFile,
+    restoreFile,
+    votePermanentDelete,
+    updateFileContent,
+  } = useRoomCollab({
     roomCode: room.code,
-    activeFileId: activeFile ? activeFile.id : '',
-    initialContent: activeFile ? activeFile.content : '',
+    initialFiles,
+    activeFileId,
+    initialContent: initialActive ? initialActive.content : '',
     currentUser,
     creatorUser: {
       id: room.creatorId,
@@ -81,31 +79,36 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     editor: editorInstance,
   });
 
-  // Save files to local storage and sync to secure database
+  const activeFiles = files.filter((f) => !f.isRecycled);
+  const activeFile = activeFiles.find((f) => f.id === activeFileId) || activeFiles[0];
+  const openFiles = files.filter((f) => openFileIds.includes(f.id) && !f.isRecycled);
+
+  // Ensure active file is kept in sync if files are created, restored, or recycled
   useEffect(() => {
-    if (files.length > 0) {
-      updateRoomFilesLocally(
-        room.code,
-        files.map((f) => ({
-          ...f,
-          projectId: room.code,
-          isRecycled: f.isRecycled,
-          recycledBy: f.recycledBy,
-          recycledAt: f.recycledAt,
-          deleteVotes: f.deleteVotes,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })),
-        currentUser
-      );
+    if (activeFileId) {
+      const current = files.find((f) => f.id === activeFileId);
+      if (!current || current.isRecycled) {
+        const next = files.find((f) => !f.isRecycled);
+        setActiveFileId(next ? next.id : '');
+      }
+    } else if (activeFiles.length > 0) {
+      setActiveFileId(activeFiles[0].id);
     }
-  }, [files, room.code, currentUser]);
+  }, [files, activeFileId, activeFiles.length]);
+
+  // Keep openFileIds cleaned of any permanently deleted or recycled files
+  useEffect(() => {
+    if (activeFile && !openFileIds.includes(activeFile.id)) {
+      setOpenFileIds((prev) => [...prev, activeFile.id]);
+    }
+  }, [activeFile?.id]);
 
   // Save / Download active file locally to computer
   const handleSaveFile = useCallback(() => {
     if (!activeFile) return;
     try {
-      const blob = new Blob([activeFile.content], { type: 'text/plain;charset=utf-8' });
+      const content = editorInstance ? editorInstance.getValue() : activeFile.content;
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -117,9 +120,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     } catch (err) {
       console.error('[Download] Failed to save file:', err);
     }
-  }, [activeFile]);
+  }, [activeFile, editorInstance]);
 
-  // Keyboard shortcut Ctrl+S / Cmd+S to download / save active file
+  // Keyboard shortcut Ctrl+S / Cmd+S to download active file
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -149,39 +152,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     }
   };
 
-  // Create or upload a file
+  // Real-time file creation (broadcasts via Yjs CRDT to all peers instantly)
   const handleCreateFile = (name: string, language: SupportedLanguage, content?: string) => {
-    const newFile: WorkspaceFile = {
-      id: `file-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      name,
-      path: `/${name}`,
-      language,
-      content: content !== undefined ? content : `// ${name}\n`,
-      isRecycled: false,
-      deleteVotes: [],
-    };
-    setFiles((prev) => [...prev, newFile]);
-    setOpenFileIds((prev) => (prev.includes(newFile.id) ? prev : [...prev, newFile.id]));
+    const newFile = createFile(name, language, content);
     setActiveFileId(newFile.id);
+    setOpenFileIds((prev) => (prev.includes(newFile.id) ? prev : [...prev, newFile.id]));
   };
 
-  // Move a file to Recycle Bin
+  // Real-time file recycle (moves to recycle bin on ALL peers' screens in realtime)
   const handleRecycleFile = (fileId: string) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === fileId
-          ? {
-              ...f,
-              isRecycled: true,
-              recycledBy: currentUser.name,
-              recycledAt: new Date().toISOString(),
-              deleteVotes: [currentUser.id],
-            }
-          : f
-      )
-    );
-
-    // Close tab if open
+    recycleFile(fileId);
     const nextOpen = openFileIds.filter((id) => id !== fileId);
     setOpenFileIds(nextOpen);
     if (activeFileId === fileId) {
@@ -190,68 +170,23 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         nextOpen.length > 0 ? nextOpen[0] : remainingActive.length > 0 ? remainingActive[0].id : ''
       );
     }
-
-    recycleFileOnServer(room.code, fileId, currentUser);
   };
 
-  // Restore file from Recycle Bin
+  // Real-time restore file (restores to active files on ALL peers' screens in realtime)
   const handleRestoreFile = (fileId: string) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === fileId
-          ? {
-              ...f,
-              isRecycled: false,
-              recycledBy: undefined,
-              recycledAt: undefined,
-              deleteVotes: [],
-            }
-          : f
-      )
-    );
-
-    restoreFileOnServer(room.code, fileId, currentUser);
+    restoreFile(fileId);
+    setOpenFileIds((prev) => (prev.includes(fileId) ? prev : [...prev, fileId]));
+    setActiveFileId(fileId);
   };
 
-  // Vote for permanent deletion (consensus of all members required)
-  const handleVotePermanentDelete = async (fileId: string) => {
-    const file = files.find((f) => f.id === fileId);
-    if (!file) return;
-
-    const currentVotes = file.deleteVotes || [];
-    const updatedVotes = currentVotes.includes(currentUser.id)
-      ? currentVotes
-      : [...currentVotes, currentUser.id];
-
-    const totalCount = Math.max(1, members.length);
-
-    if (updatedVotes.length >= totalCount) {
-      // Consensus reached! Permanently remove from workspace
-      setFiles((prev) => prev.filter((f) => f.id !== fileId));
-    } else {
-      setFiles((prev) =>
-        prev.map((f) => (f.id === fileId ? { ...f, deleteVotes: updatedVotes } : f))
-      );
+  // Real-time delete consensus vote
+  const handleVotePermanentDelete = (fileId: string) => {
+    votePermanentDelete(fileId);
+    setOpenFileIds((prev) => prev.filter((id) => id !== fileId));
+    if (activeFileId === fileId) {
+      const remaining = files.filter((f) => f.id !== fileId && !f.isRecycled);
+      setActiveFileId(remaining.length > 0 ? remaining[0].id : '');
     }
-
-    const res = await votePermanentDeleteOnServer(room.code, fileId, currentUser);
-    if (res?.permanentlyDeleted) {
-      setFiles((prev) => prev.filter((f) => f.id !== fileId));
-    }
-  };
-
-  // Edit file content
-  const handleChangeContent = (fileId: string, newContent: string) => {
-    setFiles((prev) =>
-      prev.map((f) => (f.id === fileId ? { ...f, content: newContent, isModified: true } : f))
-    );
-  };
-
-  // Change active file's language
-  const handleChangeLanguage = (newLang: SupportedLanguage) => {
-    setFiles((prev) =>
-      prev.map((f) => (f.id === activeFileId ? { ...f, language: newLang } : f))
-    );
   };
 
   // Toggle or switch sidebar view
@@ -394,7 +329,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
               <CodeEditor
                 file={activeFile}
                 settings={editorSettings}
-                onChangeContent={handleChangeContent}
+                onChangeContent={(fileId, newContent) => updateFileContent(fileId, newContent)}
                 onCursorChange={(line, col) => setCursorPos({ line, col })}
                 onMountEditor={(editor) => setEditorInstance(editor)}
               />
@@ -411,7 +346,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
       <StatusBar
         cursorPos={cursorPos}
         activeLanguage={activeFile ? activeFile.language : 'typescript'}
-        onChangeLanguage={handleChangeLanguage}
+        onChangeLanguage={(newLang) => {
+          if (activeFile) {
+            handleCreateFile(activeFile.name, newLang, activeFile.content);
+          }
+        }}
         characterCount={activeFile ? activeFile.content.length : 0}
       />
     </div>

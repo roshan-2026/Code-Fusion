@@ -7,7 +7,7 @@ import { Loader2 } from 'lucide-react';
 interface CodeEditorProps {
   file: WorkspaceFile;
   settings: EditorSettings;
-  onChangeContent: (fileId: string, newContent: string) => void;
+  onChangeContent?: (fileId: string, newContent: string) => void;
   onCursorChange: (line: number, col: number) => void;
   onMountEditor?: (editor: monacoEditor.editor.IStandaloneCodeEditor) => void;
 }
@@ -15,7 +15,6 @@ interface CodeEditorProps {
 export const CodeEditor: React.FC<CodeEditorProps> = ({
   file,
   settings,
-  onChangeContent,
   onCursorChange,
   onMountEditor,
 }) => {
@@ -69,10 +68,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         width="100%"
         theme="vs-dark"
         language={file.language}
-        value={file.content}
-        onChange={(val) => {
-          onChangeContent(file.id, val ?? '');
-        }}
+        defaultValue={file.content}
         onMount={handleEditorDidMount}
         loading={
           <div className="h-full w-full flex items-center justify-center bg-[#1e1e1e] text-neutral-400 gap-2">

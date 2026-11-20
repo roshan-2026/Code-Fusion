@@ -1,5 +1,5 @@
 import { parseDocumentName } from '@hostelcode/shared';
-import { isUserMemberOfRoom } from '../persistence/database.js';
+import { isUserMemberOfRoom, getRoom, addRoomMember } from '../persistence/database.js';
 
 export interface AuthUser {
   id: string;
@@ -61,25 +61,50 @@ export async function authenticateConnection(
 
 /**
  * Verifies if user has permission to access the project/document.
- * Enforces room membership strictly against the database.
+ * Supports both room-level documents (room:ROOMCODE) and file-level documents (project:ROOMCODE:file:FILEID).
+ * Enforces room validation against SQLite database.
  */
 export async function authorizeDocumentAccess(
   user: AuthUser,
   documentName: string
 ): Promise<boolean> {
-  const docInfo = parseDocumentName(documentName);
-  if (!docInfo) {
-    // Document format not matching project:file schema
+  let roomCode: string | null = null;
+
+  if (documentName.startsWith('room:')) {
+    roomCode = documentName.slice('room:'.length).trim().toUpperCase();
+  } else if (documentName.startsWith('project:')) {
+    const docInfo = parseDocumentName(documentName);
+    roomCode = docInfo ? docInfo.projectId.trim().toUpperCase() : null;
+  }
+
+  if (!roomCode) {
+    console.warn(`[Auth Security] Invalid document identifier format: "${documentName}"`);
     return false;
   }
 
-  const isMember = isUserMemberOfRoom(docInfo.projectId, user.id);
-  if (!isMember) {
-    console.warn(
-      `[Auth Security] Rejected user ${user.name} (${user.id}) from document ${documentName} — Not a joined member of room ${docInfo.projectId}`
+  // 1. Check existing room membership
+  let isMember = isUserMemberOfRoom(roomCode, user.id);
+  if (isMember) {
+    return true;
+  }
+
+  // 2. If not registered yet, verify the room actually exists
+  const room = getRoom(roomCode);
+  if (room) {
+    // Valid room: authorize and register user as room member
+    addRoomMember(roomCode, {
+      id: user.id,
+      name: user.name,
+      email: user.email || '',
+    });
+    console.log(
+      `[Auth Security] Auto-authorized member ${user.name} (${user.id}) for room ${roomCode}`
     );
-    return false;
+    return true;
   }
 
-  return true;
+  console.warn(
+    `[Auth Security] Rejected user ${user.name} (${user.id}) from document "${documentName}" — Room ${roomCode} does not exist.`
+  );
+  return false;
 }
