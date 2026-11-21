@@ -41,7 +41,7 @@ export function buildDocumentName(projectId: string, fileId: string): string {
   if (!projectId || !fileId) {
     throw new Error('Both projectId and fileId are required to build a document name');
   }
-  return `project:${projectId}:file:${fileId}`;
+  return `project:${projectId.trim().toUpperCase()}:file:${fileId.trim()}`;
 }
 
 /**

@@ -2,7 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import type { Room, ProjectFile } from '@hostelcode/shared';
+import type { Room, ProjectFile, RoomMember } from '@hostelcode/shared';
+import { getCollaboratorColor } from '@hostelcode/shared';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -162,8 +163,9 @@ export function isUserMemberOfRoom(roomCode: string, userId: string): boolean {
  * Retrieves all authorized members for a room
  */
 export function getRoomMembers(
-  roomCode: string
-): { id: string; name: string; email: string; joinedAt: string }[] {
+  roomCode: string,
+  creatorId?: string
+): RoomMember[] {
   const stmt = db.prepare(`
     SELECT user_id as id, user_name as name, user_email as email, joined_at as joinedAt
     FROM room_members
@@ -172,7 +174,15 @@ export function getRoomMembers(
   `);
 
   const rows = stmt.all(roomCode.toUpperCase()) as any[];
-  return rows || [];
+  return (rows || []).map((r) => ({
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    color: getCollaboratorColor(r.email || r.name),
+    isOnline: false,
+    isCreator: creatorId ? r.id === creatorId : false,
+    joinedAt: r.joinedAt,
+  }));
 }
 
 /**
@@ -232,6 +242,7 @@ export function getRoom(roomCode: string): Room | null {
     createdAt: roomRow.created_at,
     updatedAt: roomRow.updated_at,
     files: fileRows || [],
+    members: getRoomMembers(cleanCode, roomRow.creator_id),
   };
 }
 

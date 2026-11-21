@@ -165,10 +165,16 @@ const httpServer = http.createServer(async (req, res) => {
       addRoomMember(roomCode, user);
       console.log(`[Security] User ${user.name} (${user.id}) joined room ${roomCode}`);
 
+      const updatedMembers = getRoomMembers(roomCode);
+      const roomWithMembers = {
+        ...existingRoom,
+        members: updatedMembers,
+      };
+
       sendJson(res, 200, {
         success: true,
-        room: existingRoom,
-        members: getRoomMembers(roomCode),
+        room: roomWithMembers,
+        members: updatedMembers,
       });
     } catch (err: any) {
       sendJson(res, 400, { error: err.message || 'Failed to join room' });

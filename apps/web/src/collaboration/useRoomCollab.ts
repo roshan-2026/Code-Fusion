@@ -4,7 +4,7 @@ import { HocuspocusProvider } from '@hocuspocus/provider';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { MonacoCollabBinding } from './MonacoCollabBinding';
 import type * as monacoEditor from 'monaco-editor';
-import { buildDocumentName } from '@hostelcode/shared';
+import { buildDocumentName, getCollaboratorColor } from '@hostelcode/shared';
 import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage } from '@hostelcode/shared';
 import type { WorkspaceFile } from '../types/workspace';
 import { config } from '../lib/config';
@@ -19,6 +19,7 @@ import {
 interface UseRoomCollabOptions {
   roomCode: string;
   initialFiles: WorkspaceFile[];
+  initialMembers?: RoomMember[];
   activeFileId: string;
   initialContent: string;
   currentUser: AuthUser;
@@ -136,6 +137,7 @@ function reconcileOfflineSync(
 export function useRoomCollab({
   roomCode,
   initialFiles,
+  initialMembers = [],
   activeFileId,
   initialContent,
   currentUser,
@@ -148,6 +150,10 @@ export function useRoomCollab({
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+
+  // Active file ref for presence broadcast
+  const activeFileIdRef = useRef<string>(activeFileId);
+  activeFileIdRef.current = activeFileId;
 
   // Known members tracking
   const knownMembersRef = useRef<Map<string, RoomMember>>(new Map());
@@ -183,12 +189,26 @@ export function useRoomCollab({
     const yFilesMap = roomDoc.getMap<WorkspaceFile>('files');
     yFilesMapRef.current = yFilesMap;
 
+    // 1. Preload any previously joined room members from server database / cache
+    if (initialMembers && initialMembers.length > 0) {
+      initialMembers.forEach((mem) => {
+        knownMembersRef.current.set(mem.id, {
+          id: mem.id,
+          name: mem.name,
+          email: mem.email,
+          color: mem.color || getCollaboratorColor(mem.email || mem.name),
+          isOnline: mem.id === currentUser.id,
+          isCreator: mem.id === creatorUser.id || Boolean(mem.isCreator),
+        });
+      });
+    }
+
     // Register creator
     knownMembersRef.current.set(creatorUser.id, {
       id: creatorUser.id,
       name: creatorUser.name,
       email: creatorUser.email,
-      color: creatorUser.color || '#3B82F6',
+      color: creatorUser.color || getCollaboratorColor(creatorUser.email || creatorUser.name),
       isOnline: creatorUser.id === currentUser.id,
       isCreator: true,
     });
@@ -198,10 +218,64 @@ export function useRoomCollab({
       id: currentUser.id,
       name: currentUser.name,
       email: currentUser.email,
-      color: currentUser.color,
+      color: currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name),
       isOnline: true,
       isCreator: currentUser.id === creatorUser.id,
     });
+
+    // Helper to broadcast room-level presence over Yjs awareness
+    const broadcastRoomPresence = () => {
+      if (!roomProviderRef.current) return;
+      const aw = roomProviderRef.current.awareness;
+      if (!aw) return;
+      aw.setLocalStateField('user', {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        color: currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name),
+        activeFileId: activeFileIdRef.current,
+      });
+    };
+
+    const updateRoomMembers = () => {
+      const roomAwareness = roomProviderRef.current?.awareness;
+      if (!roomAwareness) return;
+
+      const onlineUsers = new Map<string, any>();
+      const states = roomAwareness.getStates();
+
+      states.forEach((state: any) => {
+        if (state.user && state.user.id) {
+          onlineUsers.set(state.user.id, state.user);
+          knownMembersRef.current.set(state.user.id, {
+            id: state.user.id,
+            name: state.user.name,
+            email: state.user.email,
+            color: state.user.color || getCollaboratorColor(state.user.email || state.user.name),
+            isOnline: true,
+            isCreator: state.user.id === creatorUser.id,
+          });
+        }
+      });
+
+      const updatedMembers: RoomMember[] = [];
+      knownMembersRef.current.forEach((mem) => {
+        updatedMembers.push({
+          ...mem,
+          isOnline: onlineUsers.has(mem.id),
+        });
+      });
+
+      // Sort: Creator first, then online, then name
+      updatedMembers.sort((a, b) => {
+        if (a.isCreator) return -1;
+        if (b.isCreator) return 1;
+        if (a.isOnline === b.isOnline) return a.name.localeCompare(b.name);
+        return a.isOnline ? -1 : 1;
+      });
+
+      setMembers(updatedMembers);
+    };
 
     const roomProvider = new HocuspocusProvider({
       url: config.collabServerUrl,
@@ -214,9 +288,12 @@ export function useRoomCollab({
       }),
       onConnect() {
         setConnectionStatus('syncing');
+        broadcastRoomPresence();
       },
       onSynced() {
         setConnectionStatus('online');
+        broadcastRoomPresence();
+        updateRoomMembers();
 
         // Initialize shared files map if empty (Creator only!)
         if (
@@ -248,6 +325,13 @@ export function useRoomCollab({
     });
     roomProviderRef.current = roomProvider;
 
+    roomProvider.on('status', ({ status }: { status: string }) => {
+      if (status === 'connected') {
+        broadcastRoomPresence();
+        updateRoomMembers();
+      }
+    });
+
     // Observe changes to shared files map — syncs file creations, deletions, and recycling across all peers in realtime!
     const filesObserver = () => {
       const currentList = Array.from(yFilesMap.values());
@@ -257,58 +341,41 @@ export function useRoomCollab({
 
     // Setup Room Awareness
     const roomAwareness = roomProvider.awareness;
-    const updateRoomMembers = () => {
-      if (!roomAwareness) return;
-
-      const onlineUsers = new Map<string, any>();
-      const states = roomAwareness.getStates();
-
-      states.forEach((state: any) => {
-        if (state.user && state.user.id) {
-          onlineUsers.set(state.user.id, state.user);
-          knownMembersRef.current.set(state.user.id, {
-            id: state.user.id,
-            name: state.user.name,
-            email: state.user.email,
-            color: state.user.color,
-            isOnline: true,
-            isCreator: state.user.id === creatorUser.id,
-          });
-        }
-      });
-
-      const updatedMembers: RoomMember[] = [];
-      knownMembersRef.current.forEach((mem) => {
-        updatedMembers.push({
-          ...mem,
-          isOnline: onlineUsers.has(mem.id),
-        });
-      });
-
-      // Sort: Creator first, then online, then name
-      updatedMembers.sort((a, b) => {
-        if (a.isCreator) return -1;
-        if (b.isCreator) return 1;
-        if (a.isOnline === b.isOnline) return a.name.localeCompare(b.name);
-        return a.isOnline ? -1 : 1;
-      });
-
-      setMembers(updatedMembers);
-    };
-
     if (roomAwareness) {
-      roomAwareness.setLocalStateField('user', {
-        id: currentUser.id,
-        name: currentUser.name,
-        email: currentUser.email,
-        color: currentUser.color,
-        activeFileId,
-      });
       roomAwareness.on('change', updateRoomMembers);
+      broadcastRoomPresence();
     }
     updateRoomMembers();
 
+    // Reconnection & focus presence handlers
+    const handleWindowFocus = () => {
+      broadcastRoomPresence();
+      updateRoomMembers();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('online', handleWindowFocus);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        broadcastRoomPresence();
+        updateRoomMembers();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Periodic presence heartbeat every 8 seconds to prevent awareness expiration
+    const presenceHeartbeat = setInterval(() => {
+      if (roomProviderRef.current && roomProviderRef.current.isConnected) {
+        broadcastRoomPresence();
+      }
+    }, 8000);
+
     return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('online', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(presenceHeartbeat);
+
       if (roomAwareness) {
         roomAwareness.off('change', updateRoomMembers);
       }
@@ -328,7 +395,7 @@ export function useRoomCollab({
         id: currentUser.id,
         name: currentUser.name,
         email: currentUser.email,
-        color: currentUser.color,
+        color: currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name),
         activeFileId,
       });
     }
@@ -406,6 +473,19 @@ export function useRoomCollab({
       }
     });
 
+    const broadcastFilePresence = () => {
+      if (!fileProviderRef.current) return;
+      const aw = fileProviderRef.current.awareness;
+      if (!aw) return;
+      aw.setLocalStateField('user', {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        color: currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name),
+      });
+      updateCursorStyles(aw);
+    };
+
     const fileProvider = new HocuspocusProvider({
       url: config.collabServerUrl,
       name: fileDocName,
@@ -417,11 +497,13 @@ export function useRoomCollab({
       }),
       onConnect() {
         registerClientMeta();
+        broadcastFilePresence();
       },
       onSynced() {
         // Only creator will seed if doc is still empty after server sync
         seedIfEmpty();
         registerClientMeta();
+        broadcastFilePresence();
 
         // Safely reconcile offline edits and highlight snippets in author unique colors
         if (wasOfflineRef.current) {
@@ -471,6 +553,12 @@ export function useRoomCollab({
     });
     fileProviderRef.current = fileProvider;
 
+    fileProvider.on('status', ({ status }: { status: string }) => {
+      if (status === 'connected') {
+        broadcastFilePresence();
+      }
+    });
+
     const handleBrowserOffline = () => {
       wasOfflineRef.current = true;
       if (fileDocRef.current) {
@@ -487,15 +575,21 @@ export function useRoomCollab({
     };
 
     if (fileAwareness) {
-      fileAwareness.setLocalStateField('user', {
-        id: currentUser.id,
-        name: currentUser.name,
-        email: currentUser.email,
-        color: currentUser.color,
-      });
       fileAwareness.on('change', handleAwarenessChange);
-      updateCursorStyles(fileAwareness);
+      broadcastFilePresence();
     }
+
+    const handleFileFocus = () => {
+      broadcastFilePresence();
+    };
+    window.addEventListener('focus', handleFileFocus);
+    window.addEventListener('online', handleFileFocus);
+
+    const filePresenceHeartbeat = setInterval(() => {
+      if (fileProviderRef.current && fileProviderRef.current.isConnected) {
+        broadcastFilePresence();
+      }
+    }, 8000);
 
     // Bind Monaco Editor to Yjs Text using our enhanced MonacoCollabBinding
     if (editor && editor.getModel() && fileAwareness) {
@@ -565,6 +659,9 @@ export function useRoomCollab({
     }
 
     return () => {
+      window.removeEventListener('focus', handleFileFocus);
+      window.removeEventListener('online', handleFileFocus);
+      clearInterval(filePresenceHeartbeat);
       window.removeEventListener('offline', handleBrowserOffline);
       if (fileAwareness) {
         fileAwareness.off('change', handleAwarenessChange);

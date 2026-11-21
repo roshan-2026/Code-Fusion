@@ -9,6 +9,7 @@ export default defineConfig({
             '@': path.resolve(__dirname, './src'),
             '@hostelcode/shared': path.resolve(__dirname, '../../packages/shared/dist/index.js'),
         },
+        dedupe: ['yjs', 'y-protocols'],
     },
     server: {
         port: 5173,

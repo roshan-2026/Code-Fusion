@@ -107,6 +107,7 @@ export interface Room {
   createdAt: string;
   updatedAt: string;
   files: ProjectFile[];
+  members?: RoomMember[];
 }
 
 /**

@@ -73,8 +73,12 @@ export async function joinRoomOnServer(roomCode: string, user: AuthUser): Promis
     if (res.ok) {
       const data = await res.json();
       if (data.room) {
-        saveRoomLocally(data.room);
-        return data.room;
+        const roomWithMembers = {
+          ...data.room,
+          members: Array.isArray(data.members) ? data.members : data.room.members || [],
+        };
+        saveRoomLocally(roomWithMembers);
+        return roomWithMembers;
       }
     }
   } catch (err) {

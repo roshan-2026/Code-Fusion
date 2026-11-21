@@ -69,6 +69,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
   } = useRoomCollab({
     roomCode: room.code,
     initialFiles,
+    initialMembers: room.members || [],
     activeFileId,
     initialContent: initialActive ? initialActive.content : '',
     currentUser,
