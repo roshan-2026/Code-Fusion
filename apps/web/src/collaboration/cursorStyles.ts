@@ -22,25 +22,31 @@ export function ensureUserEditStyle(
 
   const safeKey = String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
 
-  if (
-    styleEl.textContent?.includes(`.yRemoteEdit-${safeKey} `) ||
-    styleEl.textContent?.includes(`.yRemoteEdit-${safeKey}{`)
-  ) {
+  const ruleTag = `/* user-edit-style-${safeKey} */`;
+  if (styleEl.textContent?.includes(ruleTag)) {
     return;
   }
 
   const css = `
+    ${ruleTag}
     /* Permanent edit highlight for ${safeKey}${_name ? ` (${_name})` : ''} */
     .yRemoteEdit-${safeKey} {
-      background-color: ${color}38 !important;
-      border-bottom: 2px solid ${color}B3 !important;
-      border-radius: 2px !important;
-      box-shadow: 0 0 6px ${color}26 !important;
+      pointer-events: auto !important;
+      cursor: pointer !important;
     }
     .yRemoteEditInline-${safeKey} {
-      background-color: ${color}38 !important;
-      border-bottom: 2px solid ${color}B3 !important;
+      background-color: ${color}1C !important; /* ~11% translucent tint: 100% preserves comment and syntax highlighting */
+      border-bottom: 2px solid ${color}A6 !important; /* distinct colored underline */
       border-radius: 2px !important;
+      color: inherit !important; /* PRESERVE original code & comment syntax highlighting */
+      pointer-events: auto !important;
+      cursor: pointer !important;
+      transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    .yRemoteEditInline-${safeKey}:hover {
+      background-color: ${color}40 !important; /* illuminates to ~25% on hover */
+      border-bottom: 2px solid ${color} !important; /* vibrant colored underline */
+      box-shadow: 0 0 8px ${color}59 !important; /* soft glow on hover */
     }
   `;
   styleEl.textContent += css;
@@ -110,16 +116,16 @@ export function updateCursorStyles(awareness: Awareness): void {
 
     /* Base styles for translucent snippet edit highlights (strictly character-level, never whole line) */
     .yRemoteEdit {
-      background-color: rgba(99, 102, 241, 0.22);
-      border-bottom: 2px solid rgba(99, 102, 241, 0.6);
       border-radius: 2px;
       box-sizing: border-box;
-      pointer-events: auto;
+      pointer-events: auto !important;
+      cursor: pointer !important;
       z-index: 10;
-      transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
     }
     .yRemoteEditInline {
       color: inherit !important;
+      pointer-events: auto !important;
+      cursor: pointer !important;
     }
   `;
 
@@ -176,13 +182,24 @@ export function updateCursorStyles(awareness: Awareness): void {
 
         /* Translucent snippet edit highlight for peer ${name} */
         .yRemoteEdit-${clientID} {
-          background-color: ${color}38 !important; /* ~22% translucent opacity */
-          border-bottom: 2px solid ${color}B3 !important; /* distinct colored underline */
-          border-radius: 2px !important;
-          box-shadow: 0 0 6px ${color}26 !important;
-          transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
+          pointer-events: auto !important;
+          cursor: pointer !important;
         }
-        .yRemoteEdit-${clientID}.yRemoteEdit-fading {
+        .yRemoteEditInline-${clientID} {
+          background-color: ${color}1C !important; /* ~11% translucent tint: preserves comment & code syntax colors */
+          border-bottom: 2px solid ${color}A6 !important;
+          border-radius: 2px !important;
+          color: inherit !important;
+          pointer-events: auto !important;
+          cursor: pointer !important;
+          transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease !important;
+        }
+        .yRemoteEditInline-${clientID}:hover {
+          background-color: ${color}40 !important;
+          border-bottom: 2px solid ${color} !important;
+          box-shadow: 0 0 8px ${color}59 !important;
+        }
+        .yRemoteEditInline-${clientID}.yRemoteEdit-fading {
           background-color: transparent !important;
           border-bottom-color: transparent !important;
           box-shadow: none !important;

@@ -3,6 +3,7 @@ import * as Y from 'yjs';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { MonacoCollabBinding } from './MonacoCollabBinding';
+import * as monaco from 'monaco-editor';
 import type * as monacoEditor from 'monaco-editor';
 import { buildDocumentName, getCollaboratorColor } from '@hostelcode/shared';
 import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage, FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
@@ -694,7 +695,8 @@ export function useRoomCollab({
       initialFiles.find((f) => f.id === activeFileId);
     const seedContent = targetFile?.content || initialContent;
     const isCreator = currentUser.id === creatorUser.id;
-    const canSeed = isCreator || createdFileIdsRef.current.has(activeFileId);
+    const isInitialRoomFile = initialFiles.some((f) => f.id === activeFileId);
+    const canSeed = createdFileIdsRef.current.has(activeFileId) || (isCreator && isInitialRoomFile);
 
     const yText = fileDoc.getText('monaco');
     const dedupObserver = () => {
@@ -704,7 +706,7 @@ export function useRoomCollab({
 
     let hasSeeded = false;
     const seedIfEmpty = () => {
-      // ONLY the creator of the room or the user who created/uploaded this specific file
+      // ONLY the creator of the room on the initial file or the user who created/uploaded this specific file
       // can seed initial content if the document is still empty after server sync.
       // A joining user must NEVER insert initial template code into an existing room.
       if (!canSeed || hasSeeded) return;
@@ -712,7 +714,7 @@ export function useRoomCollab({
       if (yText.length === 0 && seedContent) {
         fileDoc.transact(() => {
           if (yText.length === 0) {
-            yText.insert(0, seedContent);
+            yText.insert(0, seedContent.replace(/\r\n/g, '\n'));
           }
         }, 'file-initial-content');
         hasSeeded = true;
@@ -1085,7 +1087,7 @@ export function useRoomCollab({
           pendingOfflineHighlightVectorRef.current = null;
         }
 
-        // Per-User UndoManager (only tracks local user edits)
+        // Per-User UndoManager (strictly tracks only local user edits created with origin `binding`)
         const undoManager = new Y.UndoManager(yText, {
           trackedOrigins: new Set([binding]),
         });
@@ -1098,24 +1100,52 @@ export function useRoomCollab({
 
         undoManager.on('stack-item-added', updateUndoState);
         undoManager.on('stack-item-popped', updateUndoState);
+        undoManager.on('stack-cleared', updateUndoState);
         updateUndoState();
 
-        editor.addCommand(2048 /* KeyMod.CtrlCmd */ | 56 /* KeyCode.KeyZ */, () => {
+        // 1. Override Monaco's core undo/redo actions so built-in model undo never reverts peers' edits
+        const undoAction = editor.getAction('undo');
+        if (undoAction) {
+          undoAction.run = () => {
+            if (undoManagerRef.current && undoManagerRef.current.canUndo()) {
+              undoManagerRef.current.undo();
+              updateUndoState();
+            }
+            return Promise.resolve();
+          };
+        }
+
+        const redoAction = editor.getAction('redo');
+        if (redoAction) {
+          redoAction.run = () => {
+            if (undoManagerRef.current && undoManagerRef.current.canRedo()) {
+              undoManagerRef.current.redo();
+              updateUndoState();
+            }
+            return Promise.resolve();
+          };
+        }
+
+        // 2. Add explicit keyboard commands so Ctrl+Z / Ctrl+Y / Cmd+Z always invoke local UndoManager
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyZ, () => {
           if (undoManager.canUndo()) {
             undoManager.undo();
+            updateUndoState();
           }
         });
         editor.addCommand(
-          2048 /* KeyMod.CtrlCmd */ | 1024 /* KeyMod.Shift */ | 56 /* KeyCode.KeyZ */,
+          monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyZ,
           () => {
             if (undoManager.canRedo()) {
               undoManager.redo();
+              updateUndoState();
             }
           }
         );
-        editor.addCommand(2048 /* KeyMod.CtrlCmd */ | 55 /* KeyCode.KeyY */, () => {
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyY, () => {
           if (undoManager.canRedo()) {
             undoManager.redo();
+            updateUndoState();
           }
         });
       } catch (err) {
@@ -1324,16 +1354,20 @@ export function useRoomCollab({
     []
   );
 
-  // Scoped undo / redo methods
+  // Scoped per-user undo / redo methods
   const handleUndo = useCallback(() => {
     if (undoManagerRef.current && undoManagerRef.current.canUndo()) {
       undoManagerRef.current.undo();
+      setCanUndo(undoManagerRef.current.canUndo());
+      setCanRedo(undoManagerRef.current.canRedo());
     }
   }, []);
 
   const handleRedo = useCallback(() => {
     if (undoManagerRef.current && undoManagerRef.current.canRedo()) {
       undoManagerRef.current.redo();
+      setCanUndo(undoManagerRef.current.canUndo());
+      setCanRedo(undoManagerRef.current.canRedo());
     }
   }, []);
 

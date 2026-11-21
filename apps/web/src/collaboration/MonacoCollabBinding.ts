@@ -21,6 +21,20 @@ interface ActiveEditHighlight {
   removeTimer: ReturnType<typeof setTimeout> | null;
 }
 
+function formatRelativeTime(timestamp: number): string {
+  const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+  if (diffSec < 10) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 /**
  * Creates a RelativeSelection from the editor's current selection.
  * For a caret cursor (collapsed selection), assoc = -1 is used for both start and end.
@@ -176,6 +190,14 @@ export class MonacoCollabBinding {
     // 2. Remote text updates handler
     this._ytextObserver = (event: Y.YTextEvent) => {
       this.mux(() => {
+        const fullExpected = this.ytext.toString();
+        const currentMonacoVal = this.monacoModel.getValue();
+
+        // If Monaco already matches Y.Text exactly, nothing to edit!
+        if (currentMonacoVal === fullExpected) {
+          return;
+        }
+
         // Detect initial file/seed transactions that should never be highlighted
         const origin = event.transaction ? event.transaction.origin : null;
         const isInitialTransaction =
@@ -189,13 +211,10 @@ export class MonacoCollabBinding {
           origin === 'deduplicate-exact-halves' ||
           origin === 'deduplicate-exact-chunks';
 
-        // For initial document population or deduplication, set Monaco model value directly
-        // to prevent incremental duplicate line insertions
-        if (isInitialTransaction) {
-          const fullVal = this.ytext.toString();
-          if (this.monacoModel.getValue() !== fullVal) {
-            this.monacoModel.setValue(fullVal);
-          }
+        // For initial document population, deduplication, or if Monaco is empty,
+        // set Monaco model value directly inside the mutex to prevent duplicate line insertions
+        if (isInitialTransaction || currentMonacoVal.length === 0) {
+          this.monacoModel.setValue(fullExpected);
           return;
         }
 
@@ -221,14 +240,16 @@ export class MonacoCollabBinding {
           if (op.retain !== undefined) {
             index += op.retain;
           } else if (op.insert !== undefined) {
-            const startPos = this.monacoModel.getPositionAt(index);
-            const range = new monaco.Selection(
+            const insert = (op.insert as string).replace(/\r\n/g, '\n');
+            const modelLen = this.monacoModel.getValueLength();
+            const startOffset = Math.max(0, Math.min(index, modelLen));
+            const startPos = this.monacoModel.getPositionAt(startOffset);
+            const range = new monaco.Range(
               startPos.lineNumber,
               startPos.column,
               startPos.lineNumber,
               startPos.column
             );
-            const insert = op.insert as string;
             this.monacoModel.applyEdits([{ range, text: insert }]);
 
             if (
@@ -238,7 +259,7 @@ export class MonacoCollabBinding {
               // Ignore whole-file initial insertions
               !(insert.length >= this.ytext.length && this.ytext.length > 30)
             ) {
-              const endPos = this.monacoModel.getPositionAt(index + insert.length);
+              const endPos = this.monacoModel.getPositionAt(startOffset + insert.length);
               if (
                 startPos.lineNumber !== endPos.lineNumber ||
                 startPos.column !== endPos.column
@@ -285,9 +306,12 @@ export class MonacoCollabBinding {
 
             index += insert.length;
           } else if (op.delete !== undefined) {
-            const pos = this.monacoModel.getPositionAt(index);
-            const endPos = this.monacoModel.getPositionAt(index + op.delete);
-            const range = new monaco.Selection(
+            const modelLen = this.monacoModel.getValueLength();
+            const startOffset = Math.max(0, Math.min(index, modelLen));
+            const endOffset = Math.max(startOffset, Math.min(index + op.delete, modelLen));
+            const pos = this.monacoModel.getPositionAt(startOffset);
+            const endPos = this.monacoModel.getPositionAt(endOffset);
+            const range = new monaco.Range(
               pos.lineNumber,
               pos.column,
               endPos.lineNumber,
@@ -296,6 +320,11 @@ export class MonacoCollabBinding {
             this.monacoModel.applyEdits([{ range, text: '' }]);
           }
         });
+
+        // Safeguard reconciliation: verify Monaco model matches ytext exactly
+        if (this.monacoModel.getValue() !== fullExpected) {
+          this.monacoModel.setValue(fullExpected);
+        }
 
         // Restore local selections: thanks to assoc = -1, caret cursors at insertion points
         // stay before the newly inserted characters and are NOT dragged to new lines or along with remote edits!
@@ -318,13 +347,20 @@ export class MonacoCollabBinding {
     };
     this.ytext.observe(this._ytextObserver);
 
-    // Initial content check: if Y.Text already has content, synchronize it to Monaco model
-    const ytextValue = this.ytext.toString();
-    if (ytextValue.length > 0) {
-      if (this.monacoModel.getValue() !== ytextValue) {
-        this.monacoModel.setValue(ytextValue);
+    // Initial content check: synchronize Y.Text to Monaco model inside mutex
+    this.mux(() => {
+      this.monacoModel.setEOL(monaco.editor.EndOfLineSequence.LF);
+      const ytextValue = this.ytext.toString();
+      if (ytextValue.length > 0) {
+        if (this.monacoModel.getValue() !== ytextValue) {
+          this.monacoModel.setValue(ytextValue);
+        }
+      } else {
+        if (this.monacoModel.getValue().length > 0) {
+          this.monacoModel.setValue('');
+        }
       }
-    }
+    });
 
     // 3. Local editor changes: apply to Y.Text with origin `this` (for per-user UndoManager tracking)
     this._monacoChangeHandler = this.monacoModel.onDidChangeContent((event) => {
@@ -334,16 +370,23 @@ export class MonacoCollabBinding {
             (c1, c2) => c2.rangeOffset - c1.rangeOffset
           );
           sorted.forEach((change) => {
-            this.ytext.delete(change.rangeOffset, change.rangeLength);
-            this.ytext.insert(change.rangeOffset, change.text);
+            const start = Math.max(0, Math.min(change.rangeOffset, this.ytext.length));
+            const delLen = Math.max(0, Math.min(change.rangeLength, this.ytext.length - start));
+            if (delLen > 0) {
+              this.ytext.delete(start, delLen);
+            }
+            if (change.text.length > 0) {
+              const textLF = change.text.replace(/\r\n/g, '\n');
+              this.ytext.insert(start, textLF);
+            }
           });
         }, this);
 
         // Do NOT update edit log per click/keystroke!
         // Buffer the edit ranges using relative positions so they track accurately across any subsequent edits
         event.changes.forEach((change) => {
-          const startOffset = change.rangeOffset;
-          const endOffset = change.rangeOffset + change.text.length;
+          const startOffset = Math.max(0, Math.min(change.rangeOffset, this.ytext.length));
+          const endOffset = Math.max(startOffset, Math.min(startOffset + change.text.length, this.ytext.length));
           const startRel = Y.createRelativePositionFromTypeIndex(
             this.ytext,
             startOffset,
@@ -351,7 +394,7 @@ export class MonacoCollabBinding {
           );
           const endRel = Y.createRelativePositionFromTypeIndex(
             this.ytext,
-            Math.max(startOffset, endOffset),
+            endOffset,
             -1
           );
           this._pendingLocalRanges.push({ startRel, endRel });
@@ -924,17 +967,8 @@ export class MonacoCollabBinding {
               endPos.column
             );
           } else {
-            // Single character/insertion point or deletion
-            const maxCol = this.monacoModel.getLineMaxColumn(startPos.lineNumber);
-            const col = Math.min(startPos.column, maxCol);
-            const nextCol = Math.min(col + 1, maxCol);
-            if (nextCol > col) {
-              range = new monaco.Range(startPos.lineNumber, col, startPos.lineNumber, nextCol);
-            } else if (col > 1) {
-              range = new monaco.Range(startPos.lineNumber, col - 1, startPos.lineNumber, col);
-            } else {
-              range = new monaco.Range(startPos.lineNumber, 1, startPos.lineNumber, 2);
-            }
+            // If the edited characters have been deleted or undone, do not highlight unrelated adjacent code
+            return;
           }
 
           const isMe = entry.userId === currentUserId;
@@ -946,10 +980,17 @@ export class MonacoCollabBinding {
           if (entry.userId) ensureUserEditStyle(entry.userId, entry.userColor, entry.userName);
           if (entry.userName) ensureUserEditStyle(entry.userName, entry.userColor, entry.userName);
 
-          const snippet = entry.text ? `: "${entry.text}"` : '';
-          const hoverText = isMe
-            ? `✍️ **You (${entry.userName})** edited${snippet} (Line ${startPos.lineNumber})`
-            : `✍️ **${entry.userName}** edited${snippet} (Line ${startPos.lineNumber})`;
+          const committerName = isMe ? `You (${entry.userName})` : entry.userName;
+          const timeAgo = entry.timestamp ? formatRelativeTime(entry.timestamp) : 'recently';
+          const codeSnippet = entry.text && entry.text.trim() ? `\n\n\`\`\`\n${entry.text}\n\`\`\`` : '';
+
+          const hoverText = [
+            `👤 **Committed by ${committerName}**`,
+            `📍 **Line ${startPos.lineNumber}** (Col ${startPos.column}-${endPos.column}) • *${timeAgo}*`,
+            codeSnippet,
+          ]
+            .filter(Boolean)
+            .join('\n');
 
           decorations.push({
             range,
@@ -1140,6 +1181,11 @@ export class MonacoCollabBinding {
           endPos.column
         );
 
+        const hoverText = [
+          `👤 **Committed by ${userName}**`,
+          `📍 **Line ${startPos.lineNumber}** (Col ${startPos.column}-${endPos.column}) • *offline catch-up*`,
+        ].join('\n');
+
         newDecorations.push({
           range,
           options: {
@@ -1147,7 +1193,7 @@ export class MonacoCollabBinding {
             className: `yRemoteEdit yRemoteEdit-${snippet.clientId}`,
             inlineClassName: `yRemoteEditInline yRemoteEditInline-${snippet.clientId}`,
             hoverMessage: {
-              value: `✍️ **${userName}** edited this snippet`,
+              value: hoverText,
             },
             overviewRuler: {
               color: userColor,

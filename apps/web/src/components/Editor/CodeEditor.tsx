@@ -23,6 +23,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
 
+    // Force LF line endings across all platforms (Windows/Linux/Mac)
+    const model = editor.getModel();
+    if (model) {
+      model.setEOL(monaco.editor.EndOfLineSequence.LF);
+    }
+
     if (onMountEditor) {
       onMountEditor(editor);
     }
@@ -69,7 +75,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         width="100%"
         theme="vs-dark"
         language={file.language}
-        defaultValue={file.content}
+        defaultValue=""
         onMount={handleEditorDidMount}
         loading={
           <div className="h-full w-full flex items-center justify-center bg-[#1e1e1e] text-neutral-400 gap-2">
