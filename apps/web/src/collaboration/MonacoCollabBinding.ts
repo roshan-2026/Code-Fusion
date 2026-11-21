@@ -98,6 +98,7 @@ export class MonacoCollabBinding {
   private _savedSelections: Map<monaco.editor.IStandaloneCodeEditor, RelativeSelection>;
   private _beforeTransaction: () => void;
   private _decorations: Map<monaco.editor.IStandaloneCodeEditor, string[]>;
+  private _allowLiveHighlights: boolean = false;
   private _editDecorations: Map<
     monaco.editor.IStandaloneCodeEditor,
     Map<string, ActiveEditHighlight>
@@ -148,9 +149,25 @@ export class MonacoCollabBinding {
     // 2. Remote text updates handler
     this._ytextObserver = (event: Y.YTextEvent) => {
       this.mux(() => {
-        // Identify which remote peer made this edit
+        // Detect initial file/seed transactions that should never be highlighted
+        const origin = event.transaction ? event.transaction.origin : null;
+        const isInitialTransaction =
+          origin === 'initialization' ||
+          origin === 'initial-seed' ||
+          origin === 'file-initial-content' ||
+          origin === 'file-upload' ||
+          origin === 'initial-load' ||
+          origin === 'offline-duplicate-reconcile' ||
+          origin === 'offline-duplicate-block-reconcile';
+
+        // Identify which remote peer made this edit (only if live highlights are enabled and not an initial file dump)
         let remoteClientId: number | null = null;
-        if (event.transaction && event.transaction.origin !== this) {
+        if (
+          this._allowLiveHighlights &&
+          !isInitialTransaction &&
+          event.transaction &&
+          event.transaction.origin !== this
+        ) {
           event.transaction.afterState.forEach((clock, client) => {
             const prev = event.transaction.beforeState.get(client) || 0;
             if (clock > prev && client !== this.doc.clientID) {
@@ -176,7 +193,14 @@ export class MonacoCollabBinding {
             const insert = op.insert as string;
             this.monacoModel.applyEdits([{ range, text: insert }]);
 
-            if (remoteClientId !== null && insert.length > 0) {
+            if (
+              this._allowLiveHighlights &&
+              !isInitialTransaction &&
+              remoteClientId !== null &&
+              insert.length > 0 &&
+              // Ignore whole-file initial insertions
+              !(insert.length >= this.ytext.length && this.ytext.length > 30)
+            ) {
               const endPos = this.monacoModel.getPositionAt(index + insert.length);
               if (
                 startPos.lineNumber !== endPos.lineNumber ||
@@ -208,8 +232,8 @@ export class MonacoCollabBinding {
           }
         });
 
-        // Add translucent character-level edit highlight for remote snippet insertions
-        if (insertedSnippets.length > 0) {
+        // Add translucent character-level edit highlight strictly for live remote snippet insertions
+        if (this._allowLiveHighlights && !isInitialTransaction && insertedSnippets.length > 0) {
           this._addRemoteEditHighlights(insertedSnippets);
         }
 
@@ -473,7 +497,7 @@ export class MonacoCollabBinding {
           className: `yRemoteEdit yRemoteEdit-${snippet.clientId}`,
           inlineClassName: `yRemoteEditInline yRemoteEditInline-${snippet.clientId}`,
           hoverMessage: {
-            value: `✍️ **${userName}** edited this snippet`,
+            value: `✍️ **${userName}** edited this snippet (visible for 15s)`,
           },
           stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
           zIndex: 10,
@@ -504,7 +528,7 @@ export class MonacoCollabBinding {
             removeTimer: null,
           };
 
-          // Visible for at least 30 seconds! Trigger smooth CSS fadeout at 30 seconds
+          // Visible for 15 seconds! Trigger smooth CSS fadeout at 15 seconds
           entry.fadeTimer = setTimeout(() => {
             const currentRange = editor.getModel()?.getDecorationRange(decId);
             if (currentRange) {
@@ -518,13 +542,13 @@ export class MonacoCollabBinding {
                 },
               ]);
             }
-          }, 30000);
+          }, 15000);
 
-          // After smooth 2s CSS dissolution, remove decoration completely at 32 seconds
+          // After smooth 2s CSS dissolution, remove decoration completely at 17 seconds
           entry.removeTimer = setTimeout(() => {
             editor.deltaDecorations([decId], []);
             editorHighlights?.delete(decId);
-          }, 32000);
+          }, 17000);
 
           editorHighlights!.set(decId, entry);
         }
@@ -559,6 +583,10 @@ export class MonacoCollabBinding {
 
     // 3. Decode baseline state vector to isolate updates applied since user went offline
     const baseline = Y.decodeStateVector(baselineStateVector);
+    if (baseline.size === 0) {
+      // Baseline was uninitialized or empty: this is a new document or first-time join
+      return { count: 0, authors: [] };
+    }
     const metaMap = this.doc.getMap<any>('_clientMeta');
 
     // Palette of vibrant colors for reliable fallback
@@ -629,6 +657,15 @@ export class MonacoCollabBinding {
     }
 
     if (snippets.length === 0) {
+      return { count: 0, authors: [] };
+    }
+
+    const totalSnippetLength = snippets.reduce(
+      (sum, s) => sum + (s.endOffset - s.startOffset),
+      0
+    );
+    // If the snippets span the entire file (e.g. newly created/uploaded file), do not highlight initial files
+    if (totalSnippetLength >= this.ytext.length && this.ytext.length > 0) {
       return { count: 0, authors: [] };
     }
 
@@ -754,6 +791,15 @@ export class MonacoCollabBinding {
       count: snippets.length,
       authors: Array.from(authorNames),
     };
+  }
+
+  /**
+   * Activates real-time snippet edit highlights after initial file load/sync has settled.
+   * This guarantees that initial file contents, uploaded files, and newly joined users
+   * do not show any highlights for existing code.
+   */
+  public enableLiveHighlights(): void {
+    this._allowLiveHighlights = true;
   }
 
   destroy(): void {

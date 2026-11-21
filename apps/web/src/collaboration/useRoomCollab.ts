@@ -39,6 +39,7 @@ function reconcileOfflineSync(
   fileDoc: Y.Doc,
   baselineContent: string | null
 ): number[] {
+  if (!baselineContent || baselineContent.trim().length === 0) return [];
   const yText = fileDoc.getText('monaco');
   let currentContent = yText.toString();
   if (!currentContent) return [];
@@ -182,6 +183,7 @@ export function useRoomCollab({
 
   // Offline highlight tracking
   const wasOfflineRef = useRef<boolean>(false);
+  const hasSyncedOnceRef = useRef<boolean>(false);
   const offlineStateVectorRef = useRef<Uint8Array | null>(null);
   const pendingOfflineHighlightVectorRef = useRef<Uint8Array | null>(null);
   const offlineBaselineTextRef = useRef<string | null>(null);
@@ -566,7 +568,7 @@ export function useRoomCollab({
           if (yText.length === 0) {
             yText.insert(0, seedContent);
           }
-        }, 'initialization');
+        }, 'file-initial-content');
         hasSeeded = true;
       } else if (yText.length > 0) {
         hasSeeded = true;
@@ -596,11 +598,11 @@ export function useRoomCollab({
       // DO NOT call seedIfEmpty() here!
       // Local IndexedDB is only a client cache. Never insert initial content before the server syncs.
       // Only if the browser is literally offline with cached content do we treat it as an offline baseline:
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (typeof navigator !== 'undefined' && !navigator.onLine && hasSyncedOnceRef.current) {
         if (!offlineStateVectorRef.current && fileDocRef.current) {
-          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
           const cached = fileDocRef.current.getText('monaco').toString();
           if (cached && cached.length > 0) {
+            offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
             offlineBaselineTextRef.current = cached;
             wasOfflineRef.current = true;
           }
@@ -640,8 +642,21 @@ export function useRoomCollab({
         registerClientMeta();
         broadcastFilePresence();
 
-        // Safely reconcile offline edits and highlight snippets in author unique colors
-        if (wasOfflineRef.current) {
+        if (!hasSyncedOnceRef.current) {
+          // Initial sync for this file in this session:
+          // Mark as synced, and do NOT apply offline highlights to existing code!
+          hasSyncedOnceRef.current = true;
+          wasOfflineRef.current = false;
+          offlineStateVectorRef.current = null;
+          offlineBaselineTextRef.current = null;
+          pendingOfflineHighlightVectorRef.current = null;
+
+          // Enable real-time snippet edit highlights after initial content settles
+          setTimeout(() => {
+            bindingRef.current?.enableLiveHighlights();
+          }, 400);
+        } else if (wasOfflineRef.current) {
+          // Reconnecting user who was already established in this room and file
           reconcileOfflineSync(
             fileDoc,
             offlineBaselineTextRef.current
@@ -669,20 +684,33 @@ export function useRoomCollab({
           wasOfflineRef.current = false;
           offlineStateVectorRef.current = null;
           offlineBaselineTextRef.current = null;
+
+          setTimeout(() => {
+            bindingRef.current?.enableLiveHighlights();
+          }, 400);
+        } else {
+          // Already synced, ensure live highlights are enabled
+          bindingRef.current?.enableLiveHighlights();
         }
       },
       onDisconnect() {
-        wasOfflineRef.current = true;
-        if (fileDocRef.current) {
-          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
-          offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
+        if (hasSyncedOnceRef.current && fileDocRef.current) {
+          const txt = fileDocRef.current.getText('monaco').toString();
+          if (txt.length > 0) {
+            wasOfflineRef.current = true;
+            offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+            offlineBaselineTextRef.current = txt;
+          }
         }
       },
       onClose({ event }: { event: any }) {
-        wasOfflineRef.current = true;
-        if (fileDocRef.current) {
-          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
-          offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
+        if (hasSyncedOnceRef.current && fileDocRef.current) {
+          const txt = fileDocRef.current.getText('monaco').toString();
+          if (txt.length > 0) {
+            wasOfflineRef.current = true;
+            offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+            offlineBaselineTextRef.current = txt;
+          }
         }
         if (
           event?.code === 4404 ||
@@ -713,10 +741,13 @@ export function useRoomCollab({
     });
 
     const handleBrowserOffline = () => {
-      wasOfflineRef.current = true;
-      if (fileDocRef.current) {
-        offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
-        offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
+      if (hasSyncedOnceRef.current && fileDocRef.current) {
+        const txt = fileDocRef.current.getText('monaco').toString();
+        if (txt.length > 0) {
+          wasOfflineRef.current = true;
+          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+          offlineBaselineTextRef.current = txt;
+        }
       }
     };
     window.addEventListener('offline', handleBrowserOffline);
@@ -755,6 +786,13 @@ export function useRoomCollab({
           fileAwareness
         );
         bindingRef.current = binding;
+
+        // If fileProvider was already synced, enable real-time edit highlights after binding mounts
+        if (hasSyncedOnceRef.current && !wasOfflineRef.current) {
+          setTimeout(() => {
+            binding.enableLiveHighlights();
+          }, 400);
+        }
 
         // If an offline highlight was pending waiting for the editor binding
         if (pendingOfflineHighlightVectorRef.current) {
@@ -832,6 +870,11 @@ export function useRoomCollab({
       fileDoc.destroy();
       fileDocRef.current = null;
       fileProviderRef.current = null;
+      hasSyncedOnceRef.current = false;
+      wasOfflineRef.current = false;
+      offlineStateVectorRef.current = null;
+      offlineBaselineTextRef.current = null;
+      pendingOfflineHighlightVectorRef.current = null;
     };
   }, [roomCode, activeFileId, currentUser.id, editor]);
 
@@ -861,7 +904,9 @@ export function useRoomCollab({
         try {
           const fileDocName = buildDocumentName(roomCode, newFile.id);
           const seedDoc = new Y.Doc();
-          seedDoc.getText('monaco').insert(0, newFile.content);
+          seedDoc.transact(() => {
+            seedDoc.getText('monaco').insert(0, newFile.content);
+          }, 'file-upload');
           const idb = new IndexeddbPersistence(fileDocName, seedDoc);
           idb.once('synced', () => {
             idb.destroy();

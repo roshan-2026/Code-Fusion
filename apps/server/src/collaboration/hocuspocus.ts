@@ -54,7 +54,9 @@ export function createHocuspocusServer(): Hocuspocus {
             if (file && file.content) {
               const yText = data.document.getText('monaco');
               if (yText.length === 0) {
-                yText.insert(0, file.content);
+                data.document.transact(() => {
+                  yText.insert(0, file.content);
+                }, 'initial-seed');
                 hasSeeded = true;
               }
             }
