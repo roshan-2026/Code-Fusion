@@ -111,6 +111,19 @@ export interface Room {
 }
 
 /**
+ * Real-time room chat message (Persists across sessions & joins)
+ */
+export interface ChatMessage {
+  id: string;
+  roomCode: string;
+  userId: string;
+  userName: string;
+  userColor: string;
+  content: string;
+  timestamp: number;
+}
+
+/**
  * Persistent edit attribution entry for shared collaborative documents
  */
 export interface FileEditLogEntry {

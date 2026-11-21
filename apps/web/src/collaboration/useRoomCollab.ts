@@ -5,7 +5,7 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { MonacoCollabBinding } from './MonacoCollabBinding';
 import type * as monacoEditor from 'monaco-editor';
 import { buildDocumentName, getCollaboratorColor } from '@hostelcode/shared';
-import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage, FileEditLogEntry } from '@hostelcode/shared';
+import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage, FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
 import type { WorkspaceFile } from '../types/workspace';
 import { config } from '../lib/config';
 import { updateCursorStyles, ensureUserEditStyle } from './cursorStyles';
@@ -18,6 +18,8 @@ import {
   verifyRoomActiveOnServer,
   fetchFileEditsFromServer,
   syncFileEditsToServer,
+  fetchChatMessagesFromServer,
+  sendChatMessageToServer,
 } from '../lib/roomStorage';
 
 export interface UseRoomCollabOptions {
@@ -216,6 +218,7 @@ export function useRoomCollab({
   const [isRoomClosed, setIsRoomClosed] = useState<boolean>(false);
   const [closureNotice, setClosureNotice] = useState<string | null>(null);
   const [activeFileEdits, setActiveFileEdits] = useState<FileEditLogEntry[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   const isClosedRef = useRef<boolean>(false);
   const onRoomClosedRef = useRef(onRoomClosed);
@@ -522,6 +525,31 @@ export function useRoomCollab({
     };
     yFilesMap.observe(filesObserver);
 
+    // Observe room chat messages (Real-time CRDT sync & permanent history)
+    const chatMap = roomDoc.getMap<ChatMessage>('chat-messages');
+    const updateChatMessages = () => {
+      const list = (Array.from(chatMap.values()) as ChatMessage[])
+        .filter((m) => Boolean(m && m.id && m.content))
+        .sort((a, b) => a.timestamp - b.timestamp);
+      setChatMessages(list);
+    };
+    updateChatMessages();
+    chatMap.observe(updateChatMessages);
+
+    // Initial fetch from SQLite database to guarantee all chat history is restored for new/offline users
+    fetchChatMessagesFromServer(roomCode).then((dbMessages) => {
+      if (dbMessages && dbMessages.length > 0 && roomDocRef.current) {
+        roomDocRef.current.transact(() => {
+          dbMessages.forEach((msg) => {
+            if (!chatMap.has(msg.id)) {
+              chatMap.set(msg.id, msg);
+            }
+          });
+        }, 'db-chat-sync');
+        updateChatMessages();
+      }
+    });
+
     // Setup Room Awareness
     const roomAwareness = roomProvider.awareness;
     if (roomAwareness) {
@@ -577,6 +605,7 @@ export function useRoomCollab({
       if (roomAwareness) {
         roomAwareness.off('change', updateRoomMembers);
       }
+      chatMap.unobserve(updateChatMessages);
       roomMetaMap.unobserve(checkRoomMetaClosure);
       yFilesMap.unobserve(filesObserver);
       roomProvider.destroy();
@@ -1209,12 +1238,47 @@ export function useRoomCollab({
     [editor]
   );
 
+  const handleSendChatMessage = useCallback(
+    (content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed) return;
+      if (!roomDocRef.current) return;
+
+      const chatMap = roomDocRef.current.getMap<ChatMessage>('chat-messages');
+      const now = Date.now();
+      const msgId = `chat_${now}_${Math.random().toString(36).substring(2, 8)}`;
+      const userColor =
+        currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name);
+
+      const newMsg: ChatMessage = {
+        id: msgId,
+        roomCode: roomCode.trim().toUpperCase(),
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userColor,
+        content: trimmed,
+        timestamp: now,
+      };
+
+      // Real-time broadcast to all peers via Yjs CRDT map
+      roomDocRef.current.transact(() => {
+        chatMap.set(msgId, newMsg);
+      }, 'local-chat-send');
+
+      // Persist permanently to server SQLite database
+      sendChatMessageToServer(roomCode, newMsg);
+    },
+    [roomCode, currentUser]
+  );
+
   return {
     connectionStatus,
     members,
     files,
     activeFileEdits,
     jumpToEdit,
+    chatMessages,
+    sendChatMessage: handleSendChatMessage,
     canUndo,
     canRedo,
     undo: handleUndo,

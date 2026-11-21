@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Files, Search, Users, Settings, AlertCircle, History } from 'lucide-react';
+import { Files, Search, Users, Settings, AlertCircle, History, MessageCircle } from 'lucide-react';
 import type * as monacoEditor from 'monaco-editor';
 import { Header } from './Header';
 import { FileExplorer } from './Sidebar/FileExplorer';
@@ -7,6 +7,7 @@ import { SearchPanel } from './Sidebar/SearchPanel';
 import { MembersPanel } from './Sidebar/MembersPanel';
 import { SettingsPanel } from './Sidebar/SettingsPanel';
 import { EditsLogPanel } from './Sidebar/EditsLogPanel';
+import { ChatPanel } from './Sidebar/ChatPanel';
 import { TabBar } from './Editor/TabBar';
 import { CodeEditor } from './Editor/CodeEditor';
 import { StatusBar } from './StatusBar';
@@ -72,6 +73,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     updateFileContent,
     activeFileEdits,
     jumpToEdit,
+    chatMessages,
+    sendChatMessage,
   } = useRoomCollab({
     roomCode: room.code,
     initialFiles,
@@ -86,6 +89,21 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     },
     editor: editorInstance,
   });
+
+  // Track unread chat messages when chat sidebar is closed
+  const [lastReadChatTimestamp, setLastReadChatTimestamp] = useState<number>(() => Date.now());
+  const unreadChatCount =
+    activeSidebar === 'chat'
+      ? 0
+      : chatMessages.filter(
+          (m) => m.userId !== currentUser.id && m.timestamp > lastReadChatTimestamp
+        ).length;
+
+  useEffect(() => {
+    if (activeSidebar === 'chat') {
+      setLastReadChatTimestamp(Date.now());
+    }
+  }, [activeSidebar, chatMessages.length]);
 
   // Auto-redirect if room is closed or does not exist
   useEffect(() => {
@@ -304,6 +322,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
                 </span>
               )}
             </button>
+            <button
+              onClick={() => handleToggleSidebar('chat')}
+              className={`p-2.5 rounded transition-colors relative ${
+                activeSidebar === 'chat'
+                  ? 'text-white bg-[#333333] border-l-2 border-l-pink-500'
+                  : 'hover:text-white hover:bg-[#2d2d2d]'
+              }`}
+              title="Team Chat (Real-time & Saved)"
+            >
+              <MessageCircle className="w-5 h-5 text-pink-400" />
+              {unreadChatCount > 0 && (
+                <span className="absolute top-1.5 right-1 px-1 py-0.2 text-[9px] font-mono font-bold rounded-full bg-gradient-to-r from-pink-500 to-rose-500 text-white min-w-[14px] text-center leading-tight shadow-md">
+                  {unreadChatCount > 99 ? '99+' : unreadChatCount}
+                </span>
+              )}
+            </button>
           </div>
           <div className="flex flex-col items-center gap-2 text-neutral-400">
             <button
@@ -322,7 +356,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
 
         {/* Sidebar Panel Content */}
         {activeSidebar && (
-          <div className="w-64 border-r border-[#3c3c3c] flex flex-col shrink-0">
+          <div
+            className={`${
+              activeSidebar === 'chat' ? 'w-80' : 'w-64'
+            } border-r border-[#3c3c3c] flex flex-col shrink-0 transition-all duration-150`}
+          >
             {activeSidebar === 'explorer' && (
               <FileExplorer
                 files={files}
@@ -353,6 +391,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
                 edits={activeFileEdits}
                 currentUserId={currentUser.id}
                 onSelectEdit={jumpToEdit}
+              />
+            )}
+            {activeSidebar === 'chat' && (
+              <ChatPanel
+                roomCode={room.code}
+                roomName={room.name}
+                messages={chatMessages}
+                currentUser={currentUser}
+                members={members}
+                onSendMessage={sendChatMessage}
               />
             )}
             {activeSidebar === 'settings' && (

@@ -21,8 +21,11 @@ import {
   saveYDocUpdate,
   saveFileEditLogs,
   getFileEditLogs,
+  saveChatMessage,
+  saveChatMessages,
+  getChatMessages,
 } from './persistence/database.js';
-import type { HealthCheckResponse, Room, ProjectFile, FileEditLogEntry } from '@hostelcode/shared';
+import type { HealthCheckResponse, Room, ProjectFile, FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
 
 const startTime = Date.now();
 const hocuspocus = createHocuspocusServer();
@@ -455,6 +458,36 @@ const httpServer = http.createServer(async (req, res) => {
         }
       } catch (err: any) {
         sendJson(res, 400, { error: err.message || 'Failed to save edits' });
+      }
+      return;
+    }
+  }
+
+  // 11. GET & POST /api/rooms/:code/chat — Room Chat Messages (Permanent database storage)
+  const roomChatMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/chat$/);
+  if (roomChatMatch) {
+    const roomCode = roomChatMatch[1].toUpperCase();
+
+    if (req.method === 'GET') {
+      const messages = getChatMessages(roomCode);
+      sendJson(res, 200, { success: true, messages });
+      return;
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const body = await parseJsonBody<{ messages?: ChatMessage[]; message?: ChatMessage }>(req);
+        if (body && Array.isArray(body.messages)) {
+          saveChatMessages(body.messages);
+          sendJson(res, 200, { success: true, count: body.messages.length });
+        } else if (body && body.message) {
+          saveChatMessage(body.message);
+          sendJson(res, 200, { success: true, message: body.message });
+        } else {
+          sendJson(res, 400, { error: 'message or messages required' });
+        }
+      } catch (err: any) {
+        sendJson(res, 400, { error: err.message || 'Failed to save chat message' });
       }
       return;
     }

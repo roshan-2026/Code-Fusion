@@ -10,7 +10,7 @@ import {
   type Hocuspocus,
 } from '@hocuspocus/server';
 import { parseDocumentName } from '@hostelcode/shared';
-import type { FileEditLogEntry } from '@hostelcode/shared';
+import type { FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
 import { authenticateConnection, authorizeDocumentAccess } from '../auth/index.js';
 import {
   getYDocUpdate,
@@ -19,6 +19,8 @@ import {
   getRoom,
   saveFileEditLogs,
   getFileEditLogs,
+  saveChatMessages,
+  getChatMessages,
 } from '../persistence/database.js';
 
 /**
@@ -174,6 +176,20 @@ export function createHocuspocusServer(): Hocuspocus {
             }, 'db-edits-sync');
           }
         }
+      } else if (documentName.startsWith('room:')) {
+        // Sync chat messages from SQLite database into room Y.Doc
+        const roomCode = documentName.slice('room:'.length).trim().toUpperCase();
+        const dbMessages = getChatMessages(roomCode);
+        if (dbMessages.length > 0) {
+          const chatMap = data.document.getMap<ChatMessage>('chat-messages');
+          data.document.transact(() => {
+            dbMessages.forEach((msg) => {
+              if (!chatMap.has(msg.id)) {
+                chatMap.set(msg.id, msg);
+              }
+            });
+          }, 'db-chat-sync');
+        }
       }
 
       return data.document;
@@ -201,6 +217,14 @@ export function createHocuspocusServer(): Hocuspocus {
             const edits = Array.from(editsMap.values()) as FileEditLogEntry[];
             saveFileEditLogs(roomCode, fileId, edits);
           }
+        }
+      } else if (documentName.startsWith('room:')) {
+        // Persist chat messages to SQLite database
+        const roomCode = documentName.slice('room:'.length).trim().toUpperCase();
+        const chatMap = document.getMap<ChatMessage>('chat-messages');
+        if (chatMap && chatMap.size > 0) {
+          const messages = Array.from(chatMap.values()) as ChatMessage[];
+          saveChatMessages(messages);
         }
       }
       // Persist binary Yjs CRDT update to SQLite database

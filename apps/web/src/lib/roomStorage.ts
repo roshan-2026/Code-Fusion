@@ -1,4 +1,4 @@
-import type { Room, ProjectFile, AuthUser, FileEditLogEntry } from '@hostelcode/shared';
+import type { Room, ProjectFile, AuthUser, FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
 import { config } from './config';
 import { getCurrentUser } from './auth';
 
@@ -514,6 +514,74 @@ export async function syncFileEditsToServer(
     return res.ok;
   } catch (err) {
     console.warn('[RoomStorage] Failed to sync file edits to server (offline):', err);
+    return false;
+  }
+}
+
+/**
+ * Fetches all permanent room chat messages stored in SQLite database on the server
+ */
+export async function fetchChatMessagesFromServer(
+  roomCode: string
+): Promise<ChatMessage[]> {
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}/chat`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.messages)) {
+        return data.messages;
+      }
+    }
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to fetch chat messages from server:', err);
+  }
+  return [];
+}
+
+/**
+ * Persists a single chat message permanently into the SQLite database on the server
+ */
+export async function sendChatMessageToServer(
+  roomCode: string,
+  message: ChatMessage
+): Promise<boolean> {
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to send chat message to server (offline):', err);
+    return false;
+  }
+}
+
+/**
+ * Bulk syncs chat messages permanently into the SQLite database on the server
+ */
+export async function syncChatMessagesToServer(
+  roomCode: string,
+  messages: ChatMessage[]
+): Promise<boolean> {
+  if (!messages || messages.length === 0) return true;
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ messages }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to sync chat messages to server (offline):', err);
     return false;
   }
 }

@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import type { Room, ProjectFile, RoomMember, FileEditLogEntry } from '@hostelcode/shared';
+import type { Room, ProjectFile, RoomMember, FileEditLogEntry, ChatMessage } from '@hostelcode/shared';
 import { getCollaboratorColor } from '@hostelcode/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -98,6 +98,19 @@ db.exec(`
     text TEXT,
     timestamp INTEGER NOT NULL,
     line_preview INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (room_code) REFERENCES rooms(code) ON DELETE CASCADE
+  );
+
+  -- Room chat messages (Saved permanently for all users & sessions)
+  CREATE TABLE IF NOT EXISTS room_chat_messages (
+    id TEXT PRIMARY KEY,
+    room_code TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    user_color TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY (room_code) REFERENCES rooms(code) ON DELETE CASCADE
   );
@@ -678,5 +691,66 @@ export function getFileEditLogs(
     text: row.text || '',
     timestamp: row.timestamp,
     linePreview: row.line_preview,
+  }));
+}
+
+/**
+ * Saves a single room chat message permanently to SQLite
+ */
+export function saveChatMessage(message: ChatMessage): void {
+  const cleanCode = message.roomCode.trim().toUpperCase();
+  const stmt = db.prepare(`
+    INSERT INTO room_chat_messages (id, room_code, user_id, user_name, user_color, content, timestamp, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      content = excluded.content,
+      timestamp = excluded.timestamp
+  `);
+  stmt.run(
+    message.id,
+    cleanCode,
+    message.userId,
+    message.userName,
+    message.userColor,
+    message.content,
+    message.timestamp || Date.now(),
+    new Date().toISOString()
+  );
+}
+
+/**
+ * Bulk saves room chat messages permanently to SQLite
+ */
+export function saveChatMessages(messages: ChatMessage[]): void {
+  for (const msg of messages) {
+    try {
+      saveChatMessage(msg);
+    } catch (err) {
+      console.warn('[Database] Error saving chat message:', err);
+    }
+  }
+}
+
+/**
+ * Retrieves all chat messages permanently stored in SQLite for a room
+ */
+export function getChatMessages(roomCode: string): ChatMessage[] {
+  const cleanCode = roomCode.trim().toUpperCase();
+  const stmt = db.prepare(`
+    SELECT id, room_code, user_id, user_name, user_color, content, timestamp
+    FROM room_chat_messages
+    WHERE room_code = ?
+    ORDER BY timestamp ASC
+  `);
+
+  const rows = stmt.all(cleanCode) as any[];
+  return rows.map((row) => ({
+    id: row.id,
+    roomCode: row.room_code,
+    userId: row.user_id,
+    userName: row.user_name,
+    userColor: row.user_color,
+    content: row.content,
+    timestamp: row.timestamp,
   }));
 }
