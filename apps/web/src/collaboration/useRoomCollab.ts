@@ -31,6 +31,62 @@ export interface UseRoomCollabOptions {
 }
 
 /**
+ * Automatically detects and eliminates exact duplicated halves or repeated chunks
+ * caused by concurrent initial seed merges, preserving exact original file contents.
+ */
+export function deduplicateExactRepetitions(fileDoc: Y.Doc): boolean {
+  try {
+    const yText = fileDoc.getText('monaco');
+    const str = yText.toString();
+    if (str.length < 20) return false;
+
+    // 1. Check exact string halves: str === half + half
+    if (str.length % 2 === 0) {
+      const half = str.length / 2;
+      if (str.slice(0, half) === str.slice(half)) {
+        fileDoc.transact(() => {
+          yText.delete(half, half);
+        }, 'deduplicate-exact-halves');
+        return true;
+      }
+    }
+
+    // 2. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
+    const lines = str.trim().split('\n');
+    for (const divisor of [4, 3, 2]) {
+      if (lines.length >= divisor * 2 && lines.length % divisor === 0) {
+        const chunkSize = lines.length / divisor;
+        const firstChunk = lines.slice(0, chunkSize).join('\n').trim();
+        let allMatch = true;
+        for (let d = 1; d < divisor; d++) {
+          const chunk = lines.slice(d * chunkSize, (d + 1) * chunkSize).join('\n').trim();
+          if (chunk !== firstChunk) {
+            allMatch = false;
+            break;
+          }
+        }
+        if (allMatch && firstChunk.length >= 10) {
+          let keepLength = 0;
+          for (let i = 0; i < chunkSize; i++) {
+            keepLength += lines[i].length + (i < chunkSize - 1 ? 1 : 0);
+          }
+          if (str[keepLength] === '\n') {
+            keepLength += 1;
+          }
+          fileDoc.transact(() => {
+            yText.delete(keepLength, yText.length - keepLength);
+          }, 'deduplicate-exact-chunks');
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Collab] Error in deduplicateExactRepetitions:', err);
+  }
+  return false;
+}
+
+/**
  * Safely reconciles concurrent identical line insertions after an offline reconnection.
  * Uses targeted character-range deletions rather than wiping the document, preserving
  * all other lines, cursor selections, and CRDT history.
@@ -180,6 +236,7 @@ export function useRoomCollab({
   const fileIndexeddbRef = useRef<IndexeddbPersistence | null>(null);
   const bindingRef = useRef<MonacoCollabBinding | null>(null);
   const undoManagerRef = useRef<Y.UndoManager | null>(null);
+  const createdFileIdsRef = useRef<Set<string>>(new Set());
 
   // Offline highlight tracking
   const wasOfflineRef = useRef<boolean>(false);
@@ -555,13 +612,20 @@ export function useRoomCollab({
       initialFiles.find((f) => f.id === activeFileId);
     const seedContent = targetFile?.content || initialContent;
     const isCreator = currentUser.id === creatorUser.id;
+    const canSeed = isCreator || createdFileIdsRef.current.has(activeFileId);
+
+    const yText = fileDoc.getText('monaco');
+    const dedupObserver = () => {
+      deduplicateExactRepetitions(fileDoc);
+    };
+    yText.observe(dedupObserver);
 
     let hasSeeded = false;
     const seedIfEmpty = () => {
-      // ONLY the creator of the room can seed initial template content if the document is still empty!
+      // ONLY the creator of the room or the user who created/uploaded this specific file
+      // can seed initial content if the document is still empty after server sync.
       // A joining user must NEVER insert initial template code into an existing room.
-      if (!isCreator || hasSeeded) return;
-      const yText = fileDoc.getText('monaco');
+      if (!canSeed || hasSeeded) return;
       // Only seed if doc has 0 length after provider sync has confirmed the room document is empty
       if (yText.length === 0 && seedContent) {
         fileDoc.transact(() => {
@@ -637,8 +701,9 @@ export function useRoomCollab({
         broadcastFilePresence();
       },
       onSynced() {
-        // Only creator will seed if doc is still empty after server sync
+        // Only creator or file creator will seed if doc is still empty after server sync
         seedIfEmpty();
+        deduplicateExactRepetitions(fileDoc);
         registerClientMeta();
         broadcastFilePresence();
 
@@ -850,6 +915,7 @@ export function useRoomCollab({
     }
 
     return () => {
+      yText.unobserve(dedupObserver);
       window.removeEventListener('focus', handleFileFocus);
       window.removeEventListener('online', handleFileFocus);
       clearInterval(filePresenceHeartbeat);
@@ -894,27 +960,12 @@ export function useRoomCollab({
         deleteVotes: [],
       };
 
+      createdFileIdsRef.current.add(newFile.id);
+
       if (yFilesMapRef.current) {
         yFilesMapRef.current.set(newFile.id, newFile);
       } else {
         setFiles((prev) => [...prev, newFile]);
-      }
-
-      if (newFile.content) {
-        try {
-          const fileDocName = buildDocumentName(roomCode, newFile.id);
-          const seedDoc = new Y.Doc();
-          seedDoc.transact(() => {
-            seedDoc.getText('monaco').insert(0, newFile.content);
-          }, 'file-upload');
-          const idb = new IndexeddbPersistence(fileDocName, seedDoc);
-          idb.once('synced', () => {
-            idb.destroy();
-            seedDoc.destroy();
-          });
-        } catch (err) {
-          console.warn('[Collab] Failed to pre-seed file into IndexedDB:', err);
-        }
       }
 
       updateRoomFilesLocally(

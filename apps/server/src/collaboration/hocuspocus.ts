@@ -3,6 +3,7 @@ import {
   Server,
   type onAuthenticatePayload,
   type onLoadDocumentPayload,
+  type onChangePayload,
   type onStoreDocumentPayload,
   type onConnectPayload,
   type onDisconnectPayload,
@@ -11,6 +12,62 @@ import {
 import { parseDocumentName } from '@hostelcode/shared';
 import { authenticateConnection, authorizeDocumentAccess } from '../auth/index.js';
 import { getYDocUpdate, saveYDocUpdate, getRoomFile, getRoom } from '../persistence/database.js';
+
+/**
+ * Deduplicates exact repeated halves or identical chunk repetitions
+ * caused by concurrent initial seed merges.
+ */
+function deduplicateDocRepetitions(document: Y.Doc): boolean {
+  try {
+    const yText = document.getText('monaco');
+    const str = yText.toString();
+    if (str.length < 20) return false;
+
+    // 1. Check exact string halves: str === half + half
+    if (str.length % 2 === 0) {
+      const half = str.length / 2;
+      if (str.slice(0, half) === str.slice(half)) {
+        document.transact(() => {
+          yText.delete(half, half);
+        }, 'deduplicate-exact-halves');
+        return true;
+      }
+    }
+
+    // 2. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
+    const lines = str.trim().split('\n');
+    for (const divisor of [4, 3, 2]) {
+      if (lines.length >= divisor * 2 && lines.length % divisor === 0) {
+        const chunkSize = lines.length / divisor;
+        const firstChunk = lines.slice(0, chunkSize).join('\n').trim();
+        let allMatch = true;
+        for (let d = 1; d < divisor; d++) {
+          const chunk = lines.slice(d * chunkSize, (d + 1) * chunkSize).join('\n').trim();
+          if (chunk !== firstChunk) {
+            allMatch = false;
+            break;
+          }
+        }
+        if (allMatch && firstChunk.length >= 10) {
+          let keepLength = 0;
+          for (let i = 0; i < chunkSize; i++) {
+            keepLength += lines[i].length + (i < chunkSize - 1 ? 1 : 0);
+          }
+          if (str[keepLength] === '\n') {
+            keepLength += 1;
+          }
+          document.transact(() => {
+            yText.delete(keepLength, yText.length - keepLength);
+          }, 'deduplicate-exact-chunks');
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Hocuspocus Server] Error running deduplicateDocRepetitions:', err);
+  }
+  return false;
+}
 
 export function createHocuspocusServer(): Hocuspocus {
   const server = Server.configure({
@@ -82,11 +139,32 @@ export function createHocuspocusServer(): Hocuspocus {
           console.log(`[Hocuspocus Server] Seeded initial content for document: ${documentName}`);
         }
       }
+
+      // Check and heal any duplicate halves or repeated chunks in active file document
+      if (documentName.startsWith('project:')) {
+        const didDedup = deduplicateDocRepetitions(data.document);
+        if (didDedup) {
+          const update = Y.encodeStateAsUpdate(data.document);
+          saveYDocUpdate(documentName, update);
+          console.log(`[Hocuspocus Server] Deduplicated duplicate halves in: ${documentName}`);
+        }
+      }
+
       return data.document;
+    },
+
+    async onChange(data: onChangePayload) {
+      const { documentName, document } = data;
+      if (documentName.startsWith('project:')) {
+        deduplicateDocRepetitions(document);
+      }
     },
 
     async onStoreDocument(data: onStoreDocumentPayload) {
       const { documentName, document } = data;
+      if (documentName.startsWith('project:')) {
+        deduplicateDocRepetitions(document);
+      }
       // Persist binary Yjs CRDT update to SQLite database
       const update = Y.encodeStateAsUpdate(document);
       saveYDocUpdate(documentName, update);

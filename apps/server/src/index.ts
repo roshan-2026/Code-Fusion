@@ -1,5 +1,6 @@
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import * as Y from 'yjs';
 import { config } from './config/index.js';
 import { createHocuspocusServer } from './collaboration/hocuspocus.js';
 import {
@@ -16,6 +17,8 @@ import {
   deleteRoom,
   getRoomsByCreator,
   clearDatabase,
+  getYDocUpdate,
+  saveYDocUpdate,
 } from './persistence/database.js';
 import type { HealthCheckResponse, Room, ProjectFile } from '@hostelcode/shared';
 
@@ -323,6 +326,18 @@ const httpServer = http.createServer(async (req, res) => {
       const files = await parseJsonBody<ProjectFile[]>(req);
       if (Array.isArray(files)) {
         saveRoomFiles(roomCode, files);
+        for (const file of files) {
+          if (file.content) {
+            const docName = `project:${roomCode}:${file.id}`;
+            const existing = getYDocUpdate(docName);
+            if (!existing || existing.byteLength === 0) {
+              const doc = new Y.Doc();
+              doc.getText('monaco').insert(0, file.content);
+              saveYDocUpdate(docName, Y.encodeStateAsUpdate(doc));
+              doc.destroy();
+            }
+          }
+        }
         sendJson(res, 200, { success: true, count: files.length });
       } else {
         sendJson(res, 400, { error: 'Files array required' });

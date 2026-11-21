@@ -158,7 +158,9 @@ export class MonacoCollabBinding {
           origin === 'file-upload' ||
           origin === 'initial-load' ||
           origin === 'offline-duplicate-reconcile' ||
-          origin === 'offline-duplicate-block-reconcile';
+          origin === 'offline-duplicate-block-reconcile' ||
+          origin === 'deduplicate-exact-halves' ||
+          origin === 'deduplicate-exact-chunks';
 
         // Identify which remote peer made this edit (only if live highlights are enabled and not an initial file dump)
         let remoteClientId: number | null = null;
