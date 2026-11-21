@@ -1,5 +1,6 @@
 import type { Room, ProjectFile, AuthUser } from '@hostelcode/shared';
 import { config } from './config';
+import { getCurrentUser } from './auth';
 
 const CACHE_PREFIX = 'hostelcode_cached_room_';
 const RECENT_ROOMS_KEY = 'hostelcode_recent_rooms';
@@ -83,6 +84,16 @@ export async function verifyRoomActiveOnServer(
     });
 
     if (res.status === 404) {
+      const cached = getLocalRoom(cleanCode);
+      const currentUser = getCurrentUser();
+      // If the room was cached and created by this user, the server may have been restarted or redeployed.
+      // Auto-restore it to keep the room online without interrupting the user.
+      if (cached && currentUser && cached.creatorId === currentUser.id) {
+        console.log(`[RoomStorage] Server restarted; auto-restoring active room ${cleanCode} to keep it online...`);
+        syncRoomToServer(cached, currentUser).catch(() => {});
+        return { exists: true };
+      }
+
       purgeRoomLocally(cleanCode);
       return {
         exists: false,
@@ -128,6 +139,15 @@ export async function joinRoomOnServer(roomCode: string, user: AuthUser): Promis
         return roomWithMembers;
       }
     } else if (res.status === 404) {
+      const cached = getLocalRoom(cleanCode);
+      if (cached && cached.creatorId === user.id) {
+        // Creator attempting to join after server redeploy: auto-restore room
+        await syncRoomToServer(cached, user);
+        if (cached.files && cached.files.length > 0) {
+          updateRoomFilesLocally(cleanCode, cached.files, user);
+        }
+        return cached;
+      }
       // Room does not exist or has been closed on server
       purgeRoomLocally(cleanCode);
       return null;
@@ -192,7 +212,24 @@ export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<
     }
 
     if (res.status === 404) {
-      // Room does NOT exist on server! Clean up any stale local cache
+      const cached = getLocalRoom(cleanCode);
+      // If the current user has this room in local storage and is the creator,
+      // the server likely redeployed or restarted with a fresh container.
+      // Auto-restore the room and its project files so data is never lost!
+      if (cached && cached.creatorId === user.id) {
+        console.log(`[RoomStorage] Server reported 404 for creator's room ${cleanCode}. Auto-restoring room to server...`);
+        try {
+          await syncRoomToServer(cached, user);
+          if (cached.files && cached.files.length > 0) {
+            updateRoomFilesLocally(cleanCode, cached.files, user);
+          }
+          return cached;
+        } catch {
+          return cached;
+        }
+      }
+
+      // Room does NOT exist on server and was not created by this user! Clean up local cache
       purgeRoomLocally(cleanCode);
       return null;
     }
@@ -235,6 +272,14 @@ export async function checkRoomExists(code: string, user: AuthUser): Promise<Roo
       return room;
     }
     if (res.status === 404) {
+      const cached = getLocalRoom(cleanCode);
+      if (cached && cached.creatorId === user.id) {
+        await syncRoomToServer(cached, user);
+        if (cached.files && cached.files.length > 0) {
+          updateRoomFilesLocally(cleanCode, cached.files, user);
+        }
+        return cached;
+      }
       purgeRoomLocally(cleanCode);
       return null;
     }
@@ -250,6 +295,9 @@ export async function checkRoomExists(code: string, user: AuthUser): Promise<Roo
  * Retrieves all active rooms created by the user from server and cache
  */
 export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
+  const localRooms = getRecentRooms().filter((r) => r && r.creatorId === user.id);
+  const localMap = new Map(localRooms.map((r) => [r.code.toUpperCase(), r]));
+
   try {
     const res = await fetch(`${config.serverHttpUrl}/api/users/${encodeURIComponent(user.id)}/rooms`, {
       headers: { 'x-user-id': user.id },
@@ -258,6 +306,21 @@ export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.rooms)) {
+        const serverCodes = new Set(data.rooms.map((r: Room) => r.code.toUpperCase()));
+
+        // If any room created by this user is missing on the server (e.g. server restarted or redeployed),
+        // auto-restore it and its files to the server so user rooms and files NEVER vanish!
+        for (const [code, localRoom] of localMap) {
+          if (!serverCodes.has(code)) {
+            console.log(`[RoomStorage] Auto-restoring user room ${code} to server...`);
+            syncRoomToServer(localRoom, user).catch(() => {});
+            if (localRoom.files && localRoom.files.length > 0) {
+              updateRoomFilesLocally(code, localRoom.files, user);
+            }
+            data.rooms.unshift(localRoom);
+          }
+        }
+
         data.rooms.forEach((r: Room) => saveRoomLocally(r));
         return data.rooms;
       }
@@ -266,7 +329,7 @@ export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
     console.warn('[RoomStorage] Failed to fetch user rooms from server, using local fallback:', err);
   }
 
-  return getRecentRooms().filter((r) => r && r.creatorId === user.id);
+  return localRooms;
 }
 
 /**

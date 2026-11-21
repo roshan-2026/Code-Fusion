@@ -5,22 +5,31 @@
 This guide provides the exact steps to publish HostelCode live to the internet.
 
 --------------------------------------------------------------------------------
-0. TROUBLESHOOTING YOUR RECENT BUILD ERRORS (NOW FIXED)
+0. TROUBLESHOOTING & DEPLOYMENT SAFETY MEASURES
 --------------------------------------------------------------------------------
-1. RENDER BACKEND ERROR:
-   "Cannot find name 'path'... Try npm i --save-dev @types/node"
-   -> FIXED: Moved `@types/node`, `@types/ws`, and `typescript` directly into
-      `dependencies` and configured `render.yaml` with `--include=dev`.
+1. DATABASE RETENTION & PERSISTENCE (SAFE DEPLOYS):
+   - Problem: Redeploying updates was resetting the SQLite database because
+     `hostelcode.db` was committed into Git and container restarts wiped it.
+   - Solution Implemented:
+     a) `hostelcode.db` is now UNTRACKED from Git and added to `.gitignore`.
+        Pushing updates (`git push`) will NEVER overwrite your live database!
+     b) Dual Persistent Storage Path Support:
+        The server supports `DATA_DIR` and `DATABASE_PATH` environment variables.
+        If using a persistent disk (Render, Docker, VPS), mount to `/var/data`
+        and set `DATA_DIR=/var/data`.
+     c) Client-Side Self-Healing Auto-Restore:
+        Even on free-tier hosting (ephemeral container filesystem restarts),
+        the browser client automatically detects missing rooms on 404, re-syncs
+        the room and all files to the server, and prevents any room loss.
 
-2. VERCEL FRONTEND ERROR:
-   "Cannot find module '@hostelcode/shared' or its corresponding type declarations"
-   -> FIXED: Updated `apps/web/package.json` build command to:
-      `tsc -b ../../packages/shared && tsc -b && vite build`
-      so that Vercel automatically compiles the shared package before building
-      the web client, even when Root Directory is set to `apps/web`!
-   -> FIXED: Explicitly typed file mapping in `apps/web/src/components/Workspace.tsx`.
-   -> FIXED: Added `"prepare": "tsc -b"` to `packages/shared/package.json` so npm
-      automatically builds shared types on `npm install`.
+2. RENDER BACKEND BUILD:
+   - Configured `render.yaml` with `--include=dev` and Node dependencies.
+
+3. VERCEL FRONTEND BUILD:
+   - Updated `apps/web/package.json` build command to:
+     `tsc -b ../../packages/shared && tsc -b && vite build`
+     so that Vercel automatically compiles the shared package before building
+     the web client.
 
 ================================================================================
 STEP 1: PUSH THE UPDATED FIXES TO GITHUB
@@ -28,10 +37,11 @@ STEP 1: PUSH THE UPDATED FIXES TO GITHUB
 Open your terminal in the project directory (`Code Fusion`) and run:
 
   git add .
-  git commit -m "fix: vercel and render monorepo build scripts"
+  git commit -m "fix: database persistence and auto-restore across deployments"
   git push origin main
 
-Once pushed to GitHub, both Render and Vercel will have the working build configuration.
+Once pushed to GitHub, both Render and Vercel will automatically redeploy. Your existing
+rooms and data will stay completely safe and intact!
 
 ================================================================================
 STEP 2: DEPLOY THE COLLABORATION BACKEND ON RENDER (FREE)

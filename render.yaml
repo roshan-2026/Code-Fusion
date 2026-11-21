@@ -16,3 +16,12 @@ services:
         value: production
       - key: CORS_ORIGIN
         value: '*'
+      # Uncomment if using Render Persistent Disks:
+      # - key: DATA_DIR
+      #   value: /var/data
+    # If upgrading to a paid instance with a persistent disk, uncomment below:
+    # disk:
+    #   name: hostelcode-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+

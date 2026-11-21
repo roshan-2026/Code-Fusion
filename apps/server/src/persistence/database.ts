@@ -8,13 +8,30 @@ import { getCollaboratorColor } from '@hostelcode/shared';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Ensure data directory exists
-const dataDir = path.resolve(__dirname, '../../data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+// Database Path configuration (supports persistent disk mount paths like /var/data or custom DATA_DIR)
+function resolveDatabasePath(): string {
+  if (process.env.DATABASE_PATH && process.env.DATABASE_PATH.trim().length > 0) {
+    const customPath = path.resolve(process.env.DATABASE_PATH.trim());
+    const customDir = path.dirname(customPath);
+    if (!fs.existsSync(customDir)) {
+      fs.mkdirSync(customDir, { recursive: true });
+    }
+    return customPath;
+  }
+
+  const baseDir =
+    process.env.DATA_DIR && process.env.DATA_DIR.trim().length > 0
+      ? path.resolve(process.env.DATA_DIR.trim())
+      : path.resolve(__dirname, '../../data');
+
+  if (!fs.existsSync(baseDir)) {
+    fs.mkdirSync(baseDir, { recursive: true });
+  }
+
+  return path.join(baseDir, 'hostelcode.db');
 }
 
-const dbPath = path.join(dataDir, 'hostelcode.db');
+const dbPath = resolveDatabasePath();
 const db = new DatabaseSync(dbPath);
 
 // Initialize database schema
