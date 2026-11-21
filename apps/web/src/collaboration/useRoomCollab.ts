@@ -5,7 +5,7 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { MonacoCollabBinding } from './MonacoCollabBinding';
 import type * as monacoEditor from 'monaco-editor';
 import { buildDocumentName, getCollaboratorColor } from '@hostelcode/shared';
-import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage } from '@hostelcode/shared';
+import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage, FileEditLogEntry } from '@hostelcode/shared';
 import type { WorkspaceFile } from '../types/workspace';
 import { config } from '../lib/config';
 import { updateCursorStyles } from './cursorStyles';
@@ -213,6 +213,7 @@ export function useRoomCollab({
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [isRoomClosed, setIsRoomClosed] = useState<boolean>(false);
   const [closureNotice, setClosureNotice] = useState<string | null>(null);
+  const [activeFileEdits, setActiveFileEdits] = useState<FileEditLogEntry[]>([]);
 
   const isClosedRef = useRef<boolean>(false);
   const onRoomClosedRef = useRef(onRoomClosed);
@@ -653,6 +654,17 @@ export function useRoomCollab({
     };
     registerClientMeta();
 
+    // Active file edits tracking for Edit History panel
+    const editsMap = fileDoc.getMap<FileEditLogEntry>('file-edits-log');
+    const updateActiveEdits = () => {
+      const list = (Array.from(editsMap.values()) as FileEditLogEntry[])
+        .filter((e) => Boolean(e && e.id))
+        .sort((a, b) => b.timestamp - a.timestamp);
+      setActiveFileEdits(list);
+    };
+    updateActiveEdits();
+    editsMap.observe(updateActiveEdits);
+
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
     fileIndexeddbRef.current = fileIndexeddb;
@@ -848,7 +860,15 @@ export function useRoomCollab({
           yText,
           editor.getModel()!,
           new Set([editor]),
-          fileAwareness
+          fileAwareness,
+          {
+            fileId: activeFileId,
+            currentUser: {
+              id: currentUser.id,
+              name: currentUser.name,
+              color: currentUser.color || getCollaboratorColor(currentUser.email || currentUser.name),
+            },
+          }
         );
         bindingRef.current = binding;
 
@@ -915,6 +935,9 @@ export function useRoomCollab({
     }
 
     return () => {
+      try {
+        editsMap.unobserve(updateActiveEdits);
+      } catch {}
       yText.unobserve(dedupObserver);
       window.removeEventListener('focus', handleFileFocus);
       window.removeEventListener('online', handleFileFocus);
@@ -1124,10 +1147,45 @@ export function useRoomCollab({
     }
   }, []);
 
+  const jumpToEdit = useCallback(
+    (entry: FileEditLogEntry) => {
+      if (!editor || !fileDocRef.current || !entry.startRelPos || !entry.endRelPos) return;
+      try {
+        const startAbs = Y.createAbsolutePositionFromRelativePosition(
+          entry.startRelPos,
+          fileDocRef.current
+        );
+        const endAbs = Y.createAbsolutePositionFromRelativePosition(
+          entry.endRelPos,
+          fileDocRef.current
+        );
+        const model = editor.getModel();
+        if (startAbs && endAbs && model) {
+          const startPos = model.getPositionAt(startAbs.index);
+          const endPos = model.getPositionAt(endAbs.index);
+          const range = {
+            startLineNumber: startPos.lineNumber,
+            startColumn: startPos.column,
+            endLineNumber: endPos.lineNumber,
+            endColumn: endPos.column,
+          };
+          editor.revealRangeInCenter(range);
+          editor.setSelection(range);
+          editor.focus();
+        }
+      } catch (err) {
+        console.warn('[Collab] Failed to jump to edit position:', err);
+      }
+    },
+    [editor]
+  );
+
   return {
     connectionStatus,
     members,
     files,
+    activeFileEdits,
+    jumpToEdit,
     canUndo,
     canRedo,
     undo: handleUndo,

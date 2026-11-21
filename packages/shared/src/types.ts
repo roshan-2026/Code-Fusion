@@ -111,6 +111,22 @@ export interface Room {
 }
 
 /**
+ * Persistent edit attribution entry for shared collaborative documents
+ */
+export interface FileEditLogEntry {
+  id: string;
+  fileId: string;
+  userId: string;
+  userName: string;
+  userColor: string;
+  startRelPos: any;
+  endRelPos: any;
+  text?: string;
+  timestamp: number;
+  linePreview?: number;
+}
+
+/**
  * Parsed document identity
  */
 export interface DocumentIdentity {

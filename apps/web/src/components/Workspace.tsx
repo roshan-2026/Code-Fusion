@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Files, Search, Users, Settings, AlertCircle } from 'lucide-react';
+import { Files, Search, Users, Settings, AlertCircle, History } from 'lucide-react';
 import type * as monacoEditor from 'monaco-editor';
 import { Header } from './Header';
 import { FileExplorer } from './Sidebar/FileExplorer';
 import { SearchPanel } from './Sidebar/SearchPanel';
 import { MembersPanel } from './Sidebar/MembersPanel';
 import { SettingsPanel } from './Sidebar/SettingsPanel';
+import { EditsLogPanel } from './Sidebar/EditsLogPanel';
 import { TabBar } from './Editor/TabBar';
 import { CodeEditor } from './Editor/CodeEditor';
 import { StatusBar } from './StatusBar';
@@ -69,6 +70,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     restoreFile,
     votePermanentDelete,
     updateFileContent,
+    activeFileEdits,
+    jumpToEdit,
   } = useRoomCollab({
     roomCode: room.code,
     initialFiles,
@@ -285,6 +288,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
                 <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-emerald-400"></span>
               )}
             </button>
+            <button
+              onClick={() => handleToggleSidebar('edits')}
+              className={`p-2.5 rounded transition-colors relative ${
+                activeSidebar === 'edits'
+                  ? 'text-white bg-[#333333] border-l-2 border-l-indigo-500'
+                  : 'hover:text-white hover:bg-[#2d2d2d]'
+              }`}
+              title="Edit History & Audit Log (Permanent Highlights)"
+            >
+              <History className="w-5 h-5 text-amber-400" />
+              {activeFileEdits.length > 0 && (
+                <span className="absolute top-1.5 right-1 px-1 py-0.2 text-[9px] font-mono font-bold rounded-full bg-indigo-500 text-white min-w-[14px] text-center leading-tight">
+                  {activeFileEdits.length > 99 ? '99+' : activeFileEdits.length}
+                </span>
+              )}
+            </button>
           </div>
           <div className="flex flex-col items-center gap-2 text-neutral-400">
             <button
@@ -326,6 +345,14 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
                 creatorName={room.creatorName}
                 creatorEmail={room.creatorEmail}
                 members={members}
+              />
+            )}
+            {activeSidebar === 'edits' && (
+              <EditsLogPanel
+                activeFileName={activeFile?.name}
+                edits={activeFileEdits}
+                currentUserId={currentUser.id}
+                onSelectEdit={jumpToEdit}
               />
             )}
             {activeSidebar === 'settings' && (

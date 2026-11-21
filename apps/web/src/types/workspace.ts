@@ -13,7 +13,7 @@ export interface WorkspaceFile {
   deleteVotes?: string[];
 }
 
-export type SidebarView = 'explorer' | 'search' | 'members' | 'settings';
+export type SidebarView = 'explorer' | 'search' | 'members' | 'settings' | 'edits';
 
 export interface EditorSettings {
   fontSize: number;

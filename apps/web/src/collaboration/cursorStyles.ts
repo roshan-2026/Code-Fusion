@@ -3,10 +3,14 @@ import type { Awareness } from 'y-protocols/awareness';
 const STYLE_ELEMENT_ID = 'hostelcode-dynamic-cursors';
 
 /**
- * Ensures a specific client's dynamic CSS rules exist in the document,
+ * Ensures a specific client or user's dynamic CSS rules exist in the document,
  * even if that peer is not currently connected in awareness.
  */
-export function ensureUserEditStyle(clientID: number, color: string, _name?: string): void {
+export function ensureUserEditStyle(
+  key: number | string,
+  color: string,
+  _name?: string
+): void {
   let styleEl = document.getElementById(STYLE_ELEMENT_ID) as HTMLStyleElement | null;
   if (!styleEl) {
     styleEl = document.createElement('style');
@@ -14,23 +18,25 @@ export function ensureUserEditStyle(clientID: number, color: string, _name?: str
     document.head.appendChild(styleEl);
   }
 
+  const safeKey = String(key).replace(/[^a-zA-Z0-9_-]/g, '_');
+
   if (
-    styleEl.textContent?.includes(`.yRemoteEdit-${clientID} `) ||
-    styleEl.textContent?.includes(`.yRemoteEdit-${clientID}{`)
+    styleEl.textContent?.includes(`.yRemoteEdit-${safeKey} `) ||
+    styleEl.textContent?.includes(`.yRemoteEdit-${safeKey}{`)
   ) {
     return;
   }
 
   const css = `
-    /* Remote edit highlight for client ${clientID}${_name ? ` (${_name})` : ''} */
-    .yRemoteEdit-${clientID} {
+    /* Edit highlight for ${safeKey}${_name ? ` (${_name})` : ''} */
+    .yRemoteEdit-${safeKey} {
       background-color: ${color}38 !important;
       border-bottom: 2px solid ${color}B3 !important;
       border-radius: 2px !important;
       box-shadow: 0 0 6px ${color}26 !important;
       transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
     }
-    .yRemoteEdit-${clientID}.yRemoteEdit-fading {
+    .yRemoteEdit-${safeKey}.yRemoteEdit-fading {
       background-color: transparent !important;
       border-bottom-color: transparent !important;
       box-shadow: none !important;
