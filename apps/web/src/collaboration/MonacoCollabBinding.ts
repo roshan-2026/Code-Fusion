@@ -189,6 +189,16 @@ export class MonacoCollabBinding {
           origin === 'deduplicate-exact-halves' ||
           origin === 'deduplicate-exact-chunks';
 
+        // For initial document population or deduplication, set Monaco model value directly
+        // to prevent incremental duplicate line insertions
+        if (isInitialTransaction) {
+          const fullVal = this.ytext.toString();
+          if (this.monacoModel.getValue() !== fullVal) {
+            this.monacoModel.setValue(fullVal);
+          }
+          return;
+        }
+
         // Identify which remote peer made this edit
         let remoteClientId: number | null = null;
         if (
@@ -308,10 +318,12 @@ export class MonacoCollabBinding {
     };
     this.ytext.observe(this._ytextObserver);
 
-    // Initial content check
+    // Initial content check: if Y.Text already has content, synchronize it to Monaco model
     const ytextValue = this.ytext.toString();
-    if (this.monacoModel.getValue() !== ytextValue) {
-      this.monacoModel.setValue(ytextValue);
+    if (ytextValue.length > 0) {
+      if (this.monacoModel.getValue() !== ytextValue) {
+        this.monacoModel.setValue(ytextValue);
+      }
     }
 
     // 3. Local editor changes: apply to Y.Text with origin `this` (for per-user UndoManager tracking)
@@ -514,6 +526,8 @@ export class MonacoCollabBinding {
 
   /**
    * Commits pending local edits line-wise to the CRDT editsMap after 5 seconds of typing inactivity.
+   * Logs only the specific change text made by the user in that line (not whole line)
+   * and highlights only that specific range on the editor.
    */
   private _commitLocalLineEdits(): void {
     if (this._isDestroyed) return;
@@ -527,7 +541,12 @@ export class MonacoCollabBinding {
     const ranges = [...this._pendingLocalRanges];
     this._pendingLocalRanges = [];
 
-    const affectedLines = new Set<number>();
+    interface LineSpan {
+      lineNum: number;
+      minOffset: number;
+      maxOffset: number;
+    }
+    const lineSpans = new Map<number, LineSpan>();
     const totalLines = this.monacoModel.getLineCount();
 
     ranges.forEach((r) => {
@@ -538,23 +557,38 @@ export class MonacoCollabBinding {
           absStart &&
           (absStart.type === this.ytext || (absStart.type as any)?._item === (this.ytext as any)?._item)
         ) {
-          const startLine = this.monacoModel.getPositionAt(absStart.index).lineNumber;
-          const endLine =
+          const startPos = this.monacoModel.getPositionAt(absStart.index);
+          const endPos =
             absEnd &&
             (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item)
-              ? this.monacoModel.getPositionAt(absEnd.index).lineNumber
-              : startLine;
+              ? this.monacoModel.getPositionAt(absEnd.index)
+              : startPos;
 
+          const startLine = startPos.lineNumber;
+          const endLine = endPos.lineNumber;
           const minL = Math.max(1, Math.min(startLine, endLine));
           const maxL = Math.min(totalLines, Math.max(startLine, endLine));
+
           for (let l = minL; l <= maxL; l++) {
-            affectedLines.add(l);
+            const startOff = absStart.index;
+            const endOff = absEnd ? absEnd.index : absStart.index;
+            const existing = lineSpans.get(l);
+            if (!existing) {
+              lineSpans.set(l, {
+                lineNum: l,
+                minOffset: Math.min(startOff, endOff),
+                maxOffset: Math.max(startOff, endOff),
+              });
+            } else {
+              existing.minOffset = Math.min(existing.minOffset, startOff, endOff);
+              existing.maxOffset = Math.max(existing.maxOffset, startOff, endOff);
+            }
           }
         }
       } catch {}
     });
 
-    if (affectedLines.size === 0) return;
+    if (lineSpans.size === 0) return;
 
     const userId = this.currentUser?.id || `client_${this.doc.clientID}`;
     const userName = this.currentUser?.name || 'You';
@@ -567,36 +601,48 @@ export class MonacoCollabBinding {
     const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
 
     this.doc.transact(() => {
-      affectedLines.forEach((lineNum) => {
+      lineSpans.forEach((span, lineNum) => {
         if (lineNum < 1 || lineNum > this.monacoModel.getLineCount()) return;
 
-        const lineContent = this.monacoModel.getLineContent(lineNum);
-        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
-
         const lineStartOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: 1 });
-        let lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
+        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
+        const lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
 
-        if (lineEndOffset === lineStartOffset && lineNum < totalLines) {
-          lineEndOffset = lineStartOffset + 1;
+        // Clamp offsets to strictly within this line
+        const clampedStart = Math.max(lineStartOffset, Math.min(lineEndOffset, span.minOffset));
+        let clampedEnd = Math.max(clampedStart, Math.min(lineEndOffset, span.maxOffset));
+
+        let changeText = '';
+        if (clampedEnd > clampedStart) {
+          const p1 = this.monacoModel.getPositionAt(clampedStart);
+          const p2 = this.monacoModel.getPositionAt(clampedEnd);
+          changeText = this.monacoModel
+            .getValueInRange(new monaco.Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column))
+            .trim();
         }
 
-        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, lineStartOffset, -1);
+        if (!changeText) {
+          const lineTrimmed = this.monacoModel.getLineContent(lineNum).trim();
+          changeText = lineTrimmed ? '(edited)' : '(empty line)';
+          clampedEnd = Math.min(lineEndOffset, clampedStart + 1);
+        }
+
+        const previewText =
+          changeText.length > 70 ? changeText.slice(0, 70) + '...' : changeText;
+
+        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, clampedStart, -1);
         const endRelPos = Y.createRelativePositionFromTypeIndex(
           this.ytext,
-          Math.max(lineStartOffset, lineEndOffset),
+          Math.max(clampedStart, clampedEnd),
           -1
         );
 
-        const trimmed = lineContent.trim();
-        const previewText =
-          trimmed.length > 70 ? trimmed.slice(0, 70) + '...' : trimmed || '(empty line)';
+        // Per-user deterministic line ID: guarantees 1 card per user per line without overwriting other users
+        const targetId = `edit_${this.fileId || 'file'}_${userId}_line_${lineNum}`;
 
-        // Deterministic line ID: guarantees strictly one authoritative entry per line
-        const targetId = `line_${this.fileId || 'file'}_${lineNum}`;
-
-        // Clean up any legacy or duplicate entries for this line
+        // Clean up older micro-entries for THIS user on this line
         existingEntries.forEach((entry) => {
-          if (entry && entry.id !== targetId) {
+          if (entry && entry.userId === userId && entry.id !== targetId) {
             let matches = entry.linePreview === lineNum;
             if (!matches && entry.startRelPos) {
               try {
@@ -646,7 +692,12 @@ export class MonacoCollabBinding {
     if (!ranges || ranges.length === 0) return;
     this._pendingRemoteRanges.delete(remoteClientId);
 
-    const affectedLines = new Set<number>();
+    interface LineSpan {
+      lineNum: number;
+      minOffset: number;
+      maxOffset: number;
+    }
+    const lineSpans = new Map<number, LineSpan>();
     const totalLines = this.monacoModel.getLineCount();
 
     ranges.forEach((r) => {
@@ -657,23 +708,38 @@ export class MonacoCollabBinding {
           absStart &&
           (absStart.type === this.ytext || (absStart.type as any)?._item === (this.ytext as any)?._item)
         ) {
-          const startLine = this.monacoModel.getPositionAt(absStart.index).lineNumber;
-          const endLine =
+          const startPos = this.monacoModel.getPositionAt(absStart.index);
+          const endPos =
             absEnd &&
             (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item)
-              ? this.monacoModel.getPositionAt(absEnd.index).lineNumber
-              : startLine;
+              ? this.monacoModel.getPositionAt(absEnd.index)
+              : startPos;
 
+          const startLine = startPos.lineNumber;
+          const endLine = endPos.lineNumber;
           const minL = Math.max(1, Math.min(startLine, endLine));
           const maxL = Math.min(totalLines, Math.max(startLine, endLine));
+
           for (let l = minL; l <= maxL; l++) {
-            affectedLines.add(l);
+            const startOff = absStart.index;
+            const endOff = absEnd ? absEnd.index : absStart.index;
+            const existing = lineSpans.get(l);
+            if (!existing) {
+              lineSpans.set(l, {
+                lineNum: l,
+                minOffset: Math.min(startOff, endOff),
+                maxOffset: Math.max(startOff, endOff),
+              });
+            } else {
+              existing.minOffset = Math.min(existing.minOffset, startOff, endOff);
+              existing.maxOffset = Math.max(existing.maxOffset, startOff, endOff);
+            }
           }
         }
       } catch {}
     });
 
-    if (affectedLines.size === 0) return;
+    if (lineSpans.size === 0) return;
 
     const awarenessState = this.awareness?.getStates().get(remoteClientId);
     const metaMap = this.doc.getMap<any>('_clientMeta');
@@ -692,52 +758,45 @@ export class MonacoCollabBinding {
     const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
 
     this.doc.transact(() => {
-      affectedLines.forEach((lineNum) => {
+      lineSpans.forEach((span, lineNum) => {
         if (lineNum < 1 || lineNum > this.monacoModel.getLineCount()) return;
 
-        // If an entry on this line was already logged recently by this user, don't duplicate
-        const alreadyLogged = existingEntries.some((entry) => {
-          if (entry.userId !== remoteUserId || entry.fileId !== this.fileId) return false;
-          const abs = Y.createAbsolutePositionFromRelativePosition(entry.startRelPos, this.doc);
-          if (
-            abs &&
-            (abs.type === this.ytext || (abs.type as any)?._item === (this.ytext as any)?._item)
-          ) {
-            const pos = this.monacoModel.getPositionAt(abs.index);
-            return pos.lineNumber === lineNum && now - entry.timestamp < 10000;
-          }
-          return false;
-        });
-
-        if (alreadyLogged) return;
-
-        const lineContent = this.monacoModel.getLineContent(lineNum);
-        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
-
         const lineStartOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: 1 });
-        let lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
+        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
+        const lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
 
-        if (lineEndOffset === lineStartOffset && lineNum < totalLines) {
-          lineEndOffset = lineStartOffset + 1;
+        const clampedStart = Math.max(lineStartOffset, Math.min(lineEndOffset, span.minOffset));
+        let clampedEnd = Math.max(clampedStart, Math.min(lineEndOffset, span.maxOffset));
+
+        let changeText = '';
+        if (clampedEnd > clampedStart) {
+          const p1 = this.monacoModel.getPositionAt(clampedStart);
+          const p2 = this.monacoModel.getPositionAt(clampedEnd);
+          changeText = this.monacoModel
+            .getValueInRange(new monaco.Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column))
+            .trim();
         }
 
-        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, lineStartOffset, -1);
+        if (!changeText) {
+          const lineTrimmed = this.monacoModel.getLineContent(lineNum).trim();
+          changeText = lineTrimmed ? '(edited)' : '(empty line)';
+          clampedEnd = Math.min(lineEndOffset, clampedStart + 1);
+        }
+
+        const previewText =
+          changeText.length > 70 ? changeText.slice(0, 70) + '...' : changeText;
+
+        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, clampedStart, -1);
         const endRelPos = Y.createRelativePositionFromTypeIndex(
           this.ytext,
-          Math.max(lineStartOffset, lineEndOffset),
+          Math.max(clampedStart, clampedEnd),
           -1
         );
 
-        const trimmed = lineContent.trim();
-        const previewText =
-          trimmed.length > 70 ? trimmed.slice(0, 70) + '...' : trimmed || '(empty line)';
+        const targetId = `edit_${this.fileId || 'file'}_${remoteUserId}_line_${lineNum}`;
 
-        // Deterministic line ID: guarantees strictly one authoritative entry per line
-        const targetId = `line_${this.fileId || 'file'}_${lineNum}`;
-
-        // Clean up any legacy or duplicate entries for this line
         existingEntries.forEach((entry) => {
-          if (entry && entry.id !== targetId) {
+          if (entry && entry.userId === remoteUserId && entry.id !== targetId) {
             let matches = entry.linePreview === lineNum;
             if (!matches && entry.startRelPos) {
               try {
@@ -773,10 +832,10 @@ export class MonacoCollabBinding {
   }
 
   /**
-   * Permanently renders line-level highlights from the CRDT edit log.
-   * This guarantees that when ANY user refreshes the page, rejoins, or joins for
-   * the first time, all edits made by any collaborator are restored and displayed
-   * in that collaborator's unique color with hover tooltips.
+   * Permanently renders snippet-level edit highlights from the CRDT edit log.
+   * Highlights ONLY the exact characters/range touched by that user on that line
+   * (never covering full lines), and displays distinct user colors and hover tooltips
+   * even when multiple users have edited the exact same line.
    */
   public renderLogHighlights(): void {
     if (this._isDestroyed) return;
@@ -809,8 +868,8 @@ export class MonacoCollabBinding {
         oldSnippets.clear();
       }
 
-      // Group entries strictly line-wise: exactly 1 highlight per line (newest edit takes precedence)
-      const lineMap = new Map<number, FileEditLogEntry>();
+      // Consolidate per user per line so each collaborator has their specific edit highlighted on that line
+      const userLineMap = new Map<string, FileEditLogEntry>();
       const sortedEntries = [...entries].sort((a, b) => a.timestamp - b.timestamp);
       sortedEntries.forEach((entry) => {
         if (!entry || !entry.startRelPos) return;
@@ -822,7 +881,8 @@ export class MonacoCollabBinding {
           ) {
             const pos = this.monacoModel.getPositionAt(abs.index);
             if (pos) {
-              lineMap.set(pos.lineNumber, entry);
+              const key = `${entry.userId || entry.userName}_${pos.lineNumber}`;
+              userLineMap.set(key, entry);
             }
           }
         } catch {}
@@ -830,11 +890,52 @@ export class MonacoCollabBinding {
 
       const decorations: monaco.editor.IModelDeltaDecoration[] = [];
 
-      lineMap.forEach((entry, lineNum) => {
+      userLineMap.forEach((entry) => {
         try {
-          if (lineNum < 1 || lineNum > this.monacoModel.getLineCount()) return;
-          const maxCol = this.monacoModel.getLineMaxColumn(lineNum);
-          if (maxCol <= 1) return; // Skip highlight on completely blank lines
+          const absStart = Y.createAbsolutePositionFromRelativePosition(entry.startRelPos, this.doc);
+          const absEnd = entry.endRelPos
+            ? Y.createAbsolutePositionFromRelativePosition(entry.endRelPos, this.doc)
+            : null;
+
+          if (
+            !absStart ||
+            !(absStart.type === this.ytext || (absStart.type as any)?._item === (this.ytext as any)?._item)
+          ) {
+            return;
+          }
+
+          const startPos = this.monacoModel.getPositionAt(absStart.index);
+          const endPos =
+            absEnd &&
+            (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item)
+              ? this.monacoModel.getPositionAt(absEnd.index)
+              : startPos;
+
+          const totalLines = this.monacoModel.getLineCount();
+          if (startPos.lineNumber < 1 || startPos.lineNumber > totalLines) return;
+
+          let range: monaco.Range;
+          if (absEnd && absEnd.index > absStart.index) {
+            // Strictly highlight ONLY the edit made by the user in that line (character span, NOT whole line)
+            range = new monaco.Range(
+              startPos.lineNumber,
+              startPos.column,
+              endPos.lineNumber,
+              endPos.column
+            );
+          } else {
+            // Single character/insertion point or deletion
+            const maxCol = this.monacoModel.getLineMaxColumn(startPos.lineNumber);
+            const col = Math.min(startPos.column, maxCol);
+            const nextCol = Math.min(col + 1, maxCol);
+            if (nextCol > col) {
+              range = new monaco.Range(startPos.lineNumber, col, startPos.lineNumber, nextCol);
+            } else if (col > 1) {
+              range = new monaco.Range(startPos.lineNumber, col - 1, startPos.lineNumber, col);
+            } else {
+              range = new monaco.Range(startPos.lineNumber, 1, startPos.lineNumber, 2);
+            }
+          }
 
           const isMe = entry.userId === currentUserId;
           const safeKey = String(entry.userId || entry.userName).replace(
@@ -845,12 +946,13 @@ export class MonacoCollabBinding {
           if (entry.userId) ensureUserEditStyle(entry.userId, entry.userColor, entry.userName);
           if (entry.userName) ensureUserEditStyle(entry.userName, entry.userColor, entry.userName);
 
+          const snippet = entry.text ? `: "${entry.text}"` : '';
           const hoverText = isMe
-            ? `✍️ **You (${entry.userName})** edited Line ${lineNum}`
-            : `✍️ **${entry.userName}** edited Line ${lineNum}`;
+            ? `✍️ **You (${entry.userName})** edited${snippet} (Line ${startPos.lineNumber})`
+            : `✍️ **${entry.userName}** edited${snippet} (Line ${startPos.lineNumber})`;
 
           decorations.push({
-            range: new monaco.Range(lineNum, 1, lineNum, maxCol),
+            range,
             options: {
               isWholeLine: false,
               className: `yRemoteEdit yRemoteEdit-${safeKey}`,

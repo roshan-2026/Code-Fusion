@@ -55,11 +55,26 @@ export function deduplicateExactRepetitions(fileDoc: Y.Doc): boolean {
       }
     }
 
-    // 2. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
+    // 2. Check exact string halves with separator
+    const halfRough = Math.floor(str.length / 2);
+    for (const offset of [halfRough - 1, halfRough, halfRough + 1]) {
+      if (offset > 10 && offset < str.length) {
+        const first = str.slice(0, offset).trim();
+        const second = str.slice(offset).trim();
+        if (first.length >= 10 && first === second) {
+          fileDoc.transact(() => {
+            yText.delete(offset, str.length - offset);
+          }, 'deduplicate-exact-halves');
+          return true;
+        }
+      }
+    }
+
+    // 3. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
     const lines = str.trim().split('\n');
     for (const divisor of [4, 3, 2]) {
-      if (lines.length >= divisor * 2 && lines.length % divisor === 0) {
-        const chunkSize = lines.length / divisor;
+      if (lines.length >= divisor * 2) {
+        const chunkSize = Math.floor(lines.length / divisor);
         const firstChunk = lines.slice(0, chunkSize).join('\n').trim();
         let allMatch = true;
         for (let d = 1; d < divisor; d++) {
@@ -72,7 +87,7 @@ export function deduplicateExactRepetitions(fileDoc: Y.Doc): boolean {
         if (allMatch && firstChunk.length >= 10) {
           let keepLength = 0;
           for (let i = 0; i < chunkSize; i++) {
-            keepLength += lines[i].length + (i < chunkSize - 1 ? 1 : 0);
+            keepLength += lines[i].length + (i < lines.length - 1 ? 1 : 0);
           }
           if (str[keepLength] === '\n') {
             keepLength += 1;
@@ -81,6 +96,39 @@ export function deduplicateExactRepetitions(fileDoc: Y.Doc): boolean {
             yText.delete(keepLength, yText.length - keepLength);
           }, 'deduplicate-exact-chunks');
           return true;
+        }
+      }
+    }
+
+    // 4. Guard against 199/odd-line duplication where file chunk repeats from mid line onwards
+    if (lines.length >= 20) {
+      const mid = Math.floor(lines.length / 2);
+      for (const splitLine of [mid - 1, mid, mid + 1]) {
+        if (splitLine >= 10 && splitLine < lines.length) {
+          const firstBlock = lines.slice(0, splitLine);
+          const secondBlock = lines.slice(splitLine);
+          const compareCount = Math.min(firstBlock.length, secondBlock.length);
+          if (compareCount >= 10) {
+            let matches = 0;
+            for (let i = 0; i < compareCount; i++) {
+              if (firstBlock[i].trim() === secondBlock[i].trim()) {
+                matches++;
+              }
+            }
+            if (matches / compareCount >= 0.95) {
+              let keepLength = 0;
+              for (let i = 0; i < splitLine; i++) {
+                keepLength += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+              }
+              if (str[keepLength] === '\n') {
+                keepLength += 1;
+              }
+              fileDoc.transact(() => {
+                yText.delete(keepLength, yText.length - keepLength);
+              }, 'deduplicate-exact-chunks');
+              return true;
+            }
+          }
         }
       }
     }
@@ -696,10 +744,10 @@ export function useRoomCollab({
         .filter((e) => Boolean(e && e.id && (e.fileId === activeFileId || !e.fileId)));
 
       const model = editor && editor.getModel();
-      const lineMap = new Map<number, FileEditLogEntry>();
+      const userLineMap = new Map<string, FileEditLogEntry>();
       const idsToDelete: string[] = [];
 
-      // Sort chronological so newer edits on the same line overwrite older ones
+      // Sort chronological so newer edits on the same line overwrite older ones for the same user
       rawList.sort((a, b) => a.timestamp - b.timestamp);
 
       rawList.forEach((entry) => {
@@ -717,29 +765,52 @@ export function useRoomCollab({
           } catch {}
         }
 
-        // Get actual full line of code from editor model instead of a single typed character
-        let fullLineText = entry.text || '';
-        if (model && currentLine >= 1 && currentLine <= model.getLineCount()) {
-          const content = model.getLineContent(currentLine).trim();
-          if (content) {
-            fullLineText = content.length > 70 ? content.slice(0, 70) + '...' : content;
-          }
+        // Get exact change snippet made by the user in that line (not whole line)
+        let changeText = entry.text || '';
+        if (model && fileDocRef.current && entry.startRelPos && entry.endRelPos) {
+          try {
+            const absStart = Y.createAbsolutePositionFromRelativePosition(
+              entry.startRelPos,
+              fileDocRef.current
+            );
+            const absEnd = Y.createAbsolutePositionFromRelativePosition(
+              entry.endRelPos,
+              fileDocRef.current
+            );
+            if (absStart && absEnd && absEnd.index > absStart.index) {
+              const p1 = model.getPositionAt(absStart.index);
+              const p2 = model.getPositionAt(absEnd.index);
+              const snippet = model
+                .getValueInRange({
+                  startLineNumber: p1.lineNumber,
+                  startColumn: p1.column,
+                  endLineNumber: p2.lineNumber,
+                  endColumn: p2.column,
+                })
+                .trim();
+              if (snippet) {
+                changeText = snippet.length > 70 ? snippet.slice(0, 70) + '...' : snippet;
+              }
+            }
+          } catch {}
         }
 
         const consolidatedEntry: FileEditLogEntry = {
           ...entry,
           linePreview: currentLine,
-          text: fullLineText,
+          text: changeText || entry.text || '(edited)',
         };
 
-        const existing = lineMap.get(currentLine);
+        // Group per user per line so multiple users editing the same line each have their edit preserved
+        const groupKey = `${entry.userId || 'anon'}_${currentLine}`;
+        const existing = userLineMap.get(groupKey);
         if (existing && existing.id !== entry.id) {
           idsToDelete.push(existing.id);
         }
-        lineMap.set(currentLine, consolidatedEntry);
+        userLineMap.set(groupKey, consolidatedEntry);
       });
 
-      // Purge any stale micro/character entries from the CRDT map
+      // Purge any stale micro/character entries for the same user on this line from the CRDT map
       if (idsToDelete.length > 0 && fileDocRef.current) {
         try {
           fileDocRef.current.transact(() => {
@@ -752,8 +823,8 @@ export function useRoomCollab({
         } catch {}
       }
 
-      // Strictly line-wise list: exactly 1 card per line, sorted newest first
-      const consolidatedList = Array.from(lineMap.values()).sort(
+      // 1 card per user per line, sorted newest first
+      const consolidatedList = Array.from(userLineMap.values()).sort(
         (a, b) => b.timestamp - a.timestamp
       );
       setActiveFileEdits(consolidatedList);

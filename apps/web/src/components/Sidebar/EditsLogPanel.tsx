@@ -29,13 +29,13 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
   currentUserId,
   onSelectEdit,
 }) => {
-  // Group and display strictly line-wise: exactly 1 card per line
+  // Group and display line-wise: 1 card per user per line so multi-user edits on the same line are each shown
   const lineWiseEdits = React.useMemo(() => {
-    const map = new Map<number, FileEditLogEntry>();
+    const map = new Map<string, FileEditLogEntry>();
     const sorted = [...edits].sort((a, b) => a.timestamp - b.timestamp);
     sorted.forEach((e) => {
-      const line = e.linePreview || 1;
-      map.set(line, e);
+      const key = `${e.userId || e.userName}_${e.linePreview || 1}`;
+      map.set(key, e);
     });
     return Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
   }, [edits]);
@@ -49,7 +49,7 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
           <span>Edit History</span>
         </div>
         <span className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded border border-indigo-500/20">
-          {lineWiseEdits.length} {lineWiseEdits.length === 1 ? 'Line Edit' : 'Line Edits'}
+          {lineWiseEdits.length} {lineWiseEdits.length === 1 ? 'Edit' : 'Edits'}
         </span>
       </div>
 

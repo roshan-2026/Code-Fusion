@@ -44,11 +44,26 @@ function deduplicateDocRepetitions(document: Y.Doc): boolean {
       }
     }
 
-    // 2. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
+    // 2. Check exact string halves with separator
+    const halfRough = Math.floor(str.length / 2);
+    for (const offset of [halfRough - 1, halfRough, halfRough + 1]) {
+      if (offset > 10 && offset < str.length) {
+        const first = str.slice(0, offset).trim();
+        const second = str.slice(offset).trim();
+        if (first.length >= 10 && first === second) {
+          document.transact(() => {
+            yText.delete(offset, str.length - offset);
+          }, 'deduplicate-exact-halves');
+          return true;
+        }
+      }
+    }
+
+    // 3. Check exact line repetitions (e.g. 2x, 3x, 4x duplicate chunks)
     const lines = str.trim().split('\n');
     for (const divisor of [4, 3, 2]) {
-      if (lines.length >= divisor * 2 && lines.length % divisor === 0) {
-        const chunkSize = lines.length / divisor;
+      if (lines.length >= divisor * 2) {
+        const chunkSize = Math.floor(lines.length / divisor);
         const firstChunk = lines.slice(0, chunkSize).join('\n').trim();
         let allMatch = true;
         for (let d = 1; d < divisor; d++) {
@@ -70,6 +85,39 @@ function deduplicateDocRepetitions(document: Y.Doc): boolean {
             yText.delete(keepLength, yText.length - keepLength);
           }, 'deduplicate-exact-chunks');
           return true;
+        }
+      }
+    }
+
+    // 4. Guard against 199/odd-line duplication where file chunk repeats from mid line onwards
+    if (lines.length >= 20) {
+      const mid = Math.floor(lines.length / 2);
+      for (const splitLine of [mid - 1, mid, mid + 1]) {
+        if (splitLine >= 10 && splitLine < lines.length) {
+          const firstBlock = lines.slice(0, splitLine);
+          const secondBlock = lines.slice(splitLine);
+          const compareCount = Math.min(firstBlock.length, secondBlock.length);
+          if (compareCount >= 10) {
+            let matches = 0;
+            for (let i = 0; i < compareCount; i++) {
+              if (firstBlock[i].trim() === secondBlock[i].trim()) {
+                matches++;
+              }
+            }
+            if (matches / compareCount >= 0.95) {
+              let keepLength = 0;
+              for (let i = 0; i < splitLine; i++) {
+                keepLength += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+              }
+              if (str[keepLength] === '\n') {
+                keepLength += 1;
+              }
+              document.transact(() => {
+                yText.delete(keepLength, yText.length - keepLength);
+              }, 'deduplicate-exact-chunks');
+              return true;
+            }
+          }
         }
       }
     }
