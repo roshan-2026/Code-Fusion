@@ -692,16 +692,77 @@ export function useRoomCollab({
     let syncToServerTimer: ReturnType<typeof setTimeout> | null = null;
 
     const updateActiveEdits = () => {
-      const list = (Array.from(editsMap.values()) as FileEditLogEntry[])
-        .filter((e) => Boolean(e && e.id))
-        .sort((a, b) => b.timestamp - a.timestamp);
-      setActiveFileEdits(list);
+      const rawList = (Array.from(editsMap.values()) as FileEditLogEntry[])
+        .filter((e) => Boolean(e && e.id && (e.fileId === activeFileId || !e.fileId)));
+
+      const model = editor && editor.getModel();
+      const lineMap = new Map<number, FileEditLogEntry>();
+      const idsToDelete: string[] = [];
+
+      // Sort chronological so newer edits on the same line overwrite older ones
+      rawList.sort((a, b) => a.timestamp - b.timestamp);
+
+      rawList.forEach((entry) => {
+        let currentLine = entry.linePreview || 1;
+        if (model && fileDocRef.current && entry.startRelPos) {
+          try {
+            const abs = Y.createAbsolutePositionFromRelativePosition(
+              entry.startRelPos,
+              fileDocRef.current
+            );
+            if (abs) {
+              const pos = model.getPositionAt(abs.index);
+              if (pos) currentLine = pos.lineNumber;
+            }
+          } catch {}
+        }
+
+        // Get actual full line of code from editor model instead of a single typed character
+        let fullLineText = entry.text || '';
+        if (model && currentLine >= 1 && currentLine <= model.getLineCount()) {
+          const content = model.getLineContent(currentLine).trim();
+          if (content) {
+            fullLineText = content.length > 70 ? content.slice(0, 70) + '...' : content;
+          }
+        }
+
+        const consolidatedEntry: FileEditLogEntry = {
+          ...entry,
+          linePreview: currentLine,
+          text: fullLineText,
+        };
+
+        const existing = lineMap.get(currentLine);
+        if (existing && existing.id !== entry.id) {
+          idsToDelete.push(existing.id);
+        }
+        lineMap.set(currentLine, consolidatedEntry);
+      });
+
+      // Purge any stale micro/character entries from the CRDT map
+      if (idsToDelete.length > 0 && fileDocRef.current) {
+        try {
+          fileDocRef.current.transact(() => {
+            idsToDelete.forEach((id) => {
+              if (editsMap.has(id)) {
+                editsMap.delete(id);
+              }
+            });
+          }, 'consolidate-line-edits');
+        } catch {}
+      }
+
+      // Strictly line-wise list: exactly 1 card per line, sorted newest first
+      const consolidatedList = Array.from(lineMap.values()).sort(
+        (a, b) => b.timestamp - a.timestamp
+      );
+      setActiveFileEdits(consolidatedList);
 
       // Debounce persistent sync to SQLite database on server
       if (syncToServerTimer) clearTimeout(syncToServerTimer);
       syncToServerTimer = setTimeout(() => {
-        if (list.length > 0) {
-          syncFileEditsToServer(roomCode, activeFileId, list);
+        if (consolidatedList.length > 0) {
+          syncFileEditsToServer(roomCode, activeFileId, consolidatedList);
         }
       }, 2000);
     };

@@ -29,6 +29,17 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
   currentUserId,
   onSelectEdit,
 }) => {
+  // Group and display strictly line-wise: exactly 1 card per line
+  const lineWiseEdits = React.useMemo(() => {
+    const map = new Map<number, FileEditLogEntry>();
+    const sorted = [...edits].sort((a, b) => a.timestamp - b.timestamp);
+    sorted.forEach((e) => {
+      const line = e.linePreview || 1;
+      map.set(line, e);
+    });
+    return Array.from(map.values()).sort((a, b) => b.timestamp - a.timestamp);
+  }, [edits]);
+
   return (
     <div className="flex-1 flex flex-col select-none overflow-hidden bg-[#1e1e1e]">
       {/* Panel Header */}
@@ -38,7 +49,7 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
           <span>Edit History</span>
         </div>
         <span className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded border border-indigo-500/20">
-          {edits.length} {edits.length === 1 ? 'Edit' : 'Edits'}
+          {lineWiseEdits.length} {lineWiseEdits.length === 1 ? 'Line Edit' : 'Line Edits'}
         </span>
       </div>
 
@@ -54,13 +65,13 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
           </span>
         </div>
         <p className="text-[10px] text-neutral-500 leading-tight">
-          Edits stay permanently logged & highlighted in each user&apos;s unique color across refreshes and team joins.
+          Edits stay permanently logged & highlighted line-wise in each user&apos;s unique color across refreshes and team joins.
         </p>
       </div>
 
       {/* Edits List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1.5 custom-scrollbar">
-        {edits.length === 0 ? (
+        {lineWiseEdits.length === 0 ? (
           <div className="py-12 px-4 text-center text-neutral-500 flex flex-col items-center">
             <Code className="w-8 h-8 text-neutral-600 mb-2 stroke-[1.5]" />
             <p className="text-xs font-medium text-neutral-400">No edits recorded yet</p>
@@ -69,7 +80,7 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
             </p>
           </div>
         ) : (
-          edits.map((entry) => {
+          lineWiseEdits.map((entry) => {
             const isMe = entry.userId === currentUserId;
             const authorName = isMe ? `${entry.userName} (You)` : entry.userName;
             const userColor = entry.userColor || '#6366F1';
@@ -100,18 +111,16 @@ export const EditsLogPanel: React.FC<EditsLogPanelProps> = ({
                   </span>
                 </div>
 
-                {/* Code Snippet Preview */}
-                {entry.text && (
-                  <div className="p-1 px-1.5 rounded bg-[#181818] border border-[#333333] font-mono text-[11px] text-neutral-300 truncate group-hover:text-white transition-colors">
-                    {entry.text}
-                  </div>
-                )}
+                {/* Line Code Preview */}
+                <div className="p-1 px-1.5 rounded bg-[#181818] border border-[#333333] font-mono text-[11px] text-neutral-300 truncate group-hover:text-white transition-colors">
+                  {entry.text && entry.text.trim() ? entry.text : '(empty line)'}
+                </div>
 
                 {/* Footer with line & jump indicator */}
                 <div className="flex items-center justify-between text-[10px] text-neutral-500 pt-0.5">
-                  <span>Line {entry.linePreview || 1}</span>
-                  <span className="opacity-0 group-hover:opacity-100 text-indigo-400 flex items-center gap-0.5 transition-opacity">
-                    Jump <ArrowRight className="w-2.5 h-2.5" />
+                  <span className="font-semibold text-neutral-400">Line {entry.linePreview || 1}</span>
+                  <span className="opacity-0 group-hover:opacity-100 text-indigo-400 flex items-center gap-0.5 transition-opacity font-medium">
+                    Jump to Line <ArrowRight className="w-2.5 h-2.5" />
                   </span>
                 </div>
               </div>
