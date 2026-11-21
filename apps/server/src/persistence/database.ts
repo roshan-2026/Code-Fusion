@@ -463,6 +463,22 @@ export function votePermanentDeleteFile(
 }
 
 /**
+ * Clears all rooms, members, files, and CRDT document updates from SQLite database
+ */
+export function clearDatabase(): void {
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    DELETE FROM document_updates;
+    DELETE FROM room_files;
+    DELETE FROM room_members;
+    DELETE FROM rooms;
+    PRAGMA foreign_keys = ON;
+    VACUUM;
+  `);
+  console.log('[HostelCode Database] All rooms, members, files, and CRDT document updates cleared successfully.');
+}
+
+/**
  * Saves binary Yjs document snapshot
  */
 export function saveYDocUpdate(docName: string, update: Uint8Array): void {

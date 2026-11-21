@@ -15,6 +15,7 @@
     "build:server": "npm run build --workspace=@hostelcode/server",
     "build:web": "npm run build --workspace=@hostelcode/web",
     "build": "npm run build:shared && npm run build:server && npm run build:web",
+    "db:clear": "node -e \"import('./apps/server/dist/persistence/database.js').then(m => m.clearDatabase());\"",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present"
   },

@@ -15,6 +15,7 @@ import {
   votePermanentDeleteFile,
   deleteRoom,
   getRoomsByCreator,
+  clearDatabase,
 } from './persistence/database.js';
 import type { HealthCheckResponse, Room, ProjectFile } from '@hostelcode/shared';
 
@@ -125,6 +126,20 @@ const httpServer = http.createServer(async (req, res) => {
       }
     } catch (err: any) {
       sendJson(res, 403, { error: err.message || 'Failed to delete room' });
+    }
+    return;
+  }
+
+  // 2d. POST /api/database/clear — Clears all rooms, members, files, and updates from the database
+  if (pathname === '/api/database/clear' && req.method === 'POST') {
+    try {
+      clearDatabase();
+      sendJson(res, 200, {
+        success: true,
+        message: 'Database cleared successfully. All rooms, members, and files removed.',
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message || 'Failed to clear database' });
     }
     return;
   }
