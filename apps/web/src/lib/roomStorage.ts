@@ -54,6 +54,53 @@ export function getRecentRooms(): Room[] {
 }
 
 /**
+ * Purges a room completely from the browser's localStorage and recent rooms list
+ */
+export function purgeRoomLocally(code: string): void {
+  try {
+    const cleanCode = code.trim().toUpperCase();
+    localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
+    const recent = getRecentRooms().filter((r) => r.code.toUpperCase() !== cleanCode);
+    localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
+    console.log(`[RoomStorage] Purged room ${cleanCode} from local storage`);
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to purge local room cache:', err);
+  }
+}
+
+/**
+ * Actively checks the server to verify whether a room is still active or has been closed.
+ * If the server reports 404, automatically purges the local cache.
+ */
+export async function verifyRoomActiveOnServer(
+  code: string
+): Promise<{ exists: boolean; message?: string }> {
+  const cleanCode = code.trim().toUpperCase();
+  try {
+    const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}/status`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (res.status === 404) {
+      purgeRoomLocally(cleanCode);
+      return {
+        exists: false,
+        message: 'This room does not exist or has been closed by the host.',
+      };
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      return { exists: Boolean(data.exists) };
+    }
+  } catch (err) {
+    // Network error: could be offline. Don't purge until confirmed
+  }
+  return { exists: true };
+}
+
+/**
  * Registers user as a joined member of a room on the server database
  */
 export async function joinRoomOnServer(roomCode: string, user: AuthUser): Promise<Room | null> {
@@ -80,6 +127,10 @@ export async function joinRoomOnServer(roomCode: string, user: AuthUser): Promis
         saveRoomLocally(roomWithMembers);
         return roomWithMembers;
       }
+    } else if (res.status === 404) {
+      // Room does not exist or has been closed on server
+      purgeRoomLocally(cleanCode);
+      return null;
     }
   } catch (err) {
     console.warn('[RoomStorage] Server unreachable; continuing in local offline mode:', err);
@@ -142,9 +193,7 @@ export async function fetchRoomWithCache(code: string, user: AuthUser): Promise<
 
     if (res.status === 404) {
       // Room does NOT exist on server! Clean up any stale local cache
-      try {
-        localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
-      } catch {}
+      purgeRoomLocally(cleanCode);
       return null;
     }
   } catch (err) {
@@ -185,6 +234,10 @@ export async function checkRoomExists(code: string, user: AuthUser): Promise<Roo
       saveRoomLocally(room);
       return room;
     }
+    if (res.status === 404) {
+      purgeRoomLocally(cleanCode);
+      return null;
+    }
   } catch (err) {
     console.warn('[RoomStorage] Server unreachable, checking local cache:', err);
     const cached = getLocalRoom(cleanCode);
@@ -221,11 +274,7 @@ export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
  */
 export async function deleteRoomOnServer(roomCode: string, user: AuthUser): Promise<boolean> {
   const cleanCode = roomCode.trim().toUpperCase();
-  try {
-    localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
-    const recent = getRecentRooms().filter((r) => r.code.toUpperCase() !== cleanCode);
-    localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
-  } catch {}
+  purgeRoomLocally(cleanCode);
 
   try {
     const res = await fetch(`${config.serverHttpUrl}/api/rooms/${cleanCode}`, {

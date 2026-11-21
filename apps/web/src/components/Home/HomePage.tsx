@@ -155,7 +155,7 @@ export const HomePage: React.FC<HomePageProps> = ({
     try {
       const room = await checkRoomExists(cleanCode, currentUser);
       if (!room) {
-        setJoinError(`No room available with code "${cleanCode}". Please verify the code or create a new team room.`);
+        setJoinError('This room does not exist or has been closed by the host.');
         setIsCheckingRoom(false);
         return;
       }

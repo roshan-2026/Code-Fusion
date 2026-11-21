@@ -14,9 +14,11 @@ import {
   recycleFileOnServer,
   restoreFileOnServer,
   votePermanentDeleteOnServer,
+  purgeRoomLocally,
+  verifyRoomActiveOnServer,
 } from '../lib/roomStorage';
 
-interface UseRoomCollabOptions {
+export interface UseRoomCollabOptions {
   roomCode: string;
   initialFiles: WorkspaceFile[];
   initialMembers?: RoomMember[];
@@ -25,6 +27,7 @@ interface UseRoomCollabOptions {
   currentUser: AuthUser;
   creatorUser: { id: string; name: string; email: string; color?: string };
   editor: monacoEditor.editor.IStandaloneCodeEditor | null;
+  onRoomClosed?: (message: string) => void;
 }
 
 /**
@@ -143,6 +146,7 @@ export function useRoomCollab({
   currentUser,
   creatorUser,
   editor,
+  onRoomClosed,
 }: UseRoomCollabOptions) {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('offline');
   const [members, setMembers] = useState<RoomMember[]>([]);
@@ -150,6 +154,12 @@ export function useRoomCollab({
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [isRoomClosed, setIsRoomClosed] = useState<boolean>(false);
+  const [closureNotice, setClosureNotice] = useState<string | null>(null);
+
+  const isClosedRef = useRef<boolean>(false);
+  const onRoomClosedRef = useRef(onRoomClosed);
+  onRoomClosedRef.current = onRoomClosed;
 
   // Active file ref for presence broadcast
   const activeFileIdRef = useRef<string>(activeFileId);
@@ -176,6 +186,48 @@ export function useRoomCollab({
   const pendingOfflineHighlightVectorRef = useRef<Uint8Array | null>(null);
   const offlineBaselineTextRef = useRef<string | null>(null);
 
+  // Centralized handler for when room is closed or does not exist
+  const triggerRoomClosed = useCallback(
+    (message: string) => {
+      if (isClosedRef.current) return;
+      isClosedRef.current = true;
+      setIsRoomClosed(true);
+      setClosureNotice(message);
+
+      console.warn(`[Collab] Room ${roomCode} has been closed: ${message}`);
+      purgeRoomLocally(roomCode);
+
+      try {
+        roomProviderRef.current?.disconnect();
+        roomProviderRef.current?.destroy();
+      } catch {}
+      try {
+        fileProviderRef.current?.disconnect();
+        fileProviderRef.current?.destroy();
+      } catch {}
+
+      if (onRoomClosedRef.current) {
+        onRoomClosedRef.current(message);
+      }
+    },
+    [roomCode]
+  );
+
+  // Stamping closure in room CRDT metadata before admin deletion propagates instantly to all online peers
+  const markRoomClosed = useCallback(() => {
+    if (roomDocRef.current) {
+      try {
+        const roomMeta = roomDocRef.current.getMap('roomMeta');
+        roomDocRef.current.transact(() => {
+          roomMeta.set('status', 'closed');
+          roomMeta.set('closureMessage', 'This room does not exist or has been closed by the host.');
+        }, 'host-close-room');
+      } catch (err) {
+        console.warn('[Collab] Failed to stamp roomMeta closure:', err);
+      }
+    }
+  }, []);
+
   // =========================================================================
   // 1. ROOM PROVIDER: Manages Room Awareness & Real-Time CRDT Files Map
   // =========================================================================
@@ -188,6 +240,17 @@ export function useRoomCollab({
 
     const yFilesMap = roomDoc.getMap<WorkspaceFile>('files');
     yFilesMapRef.current = yFilesMap;
+
+    const roomMetaMap = roomDoc.getMap('roomMeta');
+    const checkRoomMetaClosure = () => {
+      if (roomMetaMap.get('status') === 'closed') {
+        const msg =
+          (roomMetaMap.get('closureMessage') as string) ||
+          'This room does not exist or has been closed by the host.';
+        triggerRoomClosed(msg);
+      }
+    };
+    roomMetaMap.observe(checkRoomMetaClosure);
 
     // 1. Preload any previously joined room members from server database / cache
     if (initialMembers && initialMembers.length > 0) {
@@ -277,6 +340,27 @@ export function useRoomCollab({
       setMembers(updatedMembers);
     };
 
+    // Server verification helper to check if room is still active
+    const verifyRoomStatus = async () => {
+      if (isClosedRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      try {
+        const check = await verifyRoomActiveOnServer(roomCode);
+        if (!check.exists) {
+          triggerRoomClosed(
+            check.message || 'This room does not exist or has been closed by the host.'
+          );
+        }
+      } catch (err) {
+        console.warn('[Collab] Error checking room status:', err);
+      }
+    };
+
+    // Actively verify room existence on mount if online
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      verifyRoomStatus();
+    }
+
     const roomProvider = new HocuspocusProvider({
       url: config.collabServerUrl,
       name: roomDocName,
@@ -294,6 +378,7 @@ export function useRoomCollab({
         setConnectionStatus('online');
         broadcastRoomPresence();
         updateRoomMembers();
+        checkRoomMetaClosure();
 
         // Initialize shared files map if empty (Creator only!)
         if (
@@ -315,20 +400,54 @@ export function useRoomCollab({
       onDisconnect() {
         setConnectionStatus('offline');
       },
-      onClose() {
+      onClose({ event }: { event: any }) {
         setConnectionStatus('offline');
+        if (
+          event?.code === 4404 ||
+          event?.reason?.includes('closed') ||
+          event?.reason?.includes('does not exist')
+        ) {
+          triggerRoomClosed(
+            event?.reason || 'This room does not exist or has been closed by the host.'
+          );
+        }
       },
-      onAuthenticationFailed({ reason }) {
+      onAuthenticationFailed({ reason }: { reason: string }) {
         console.error('[Hocuspocus Room Auth Failed]', reason);
         setConnectionStatus('offline');
+        if (
+          reason?.includes('ROOM_NOT_FOUND') ||
+          reason?.includes('does not exist') ||
+          reason?.includes('closed')
+        ) {
+          triggerRoomClosed('This room does not exist or has been closed by the host.');
+        } else {
+          verifyRoomActiveOnServer(roomCode).then((check) => {
+            if (!check.exists) {
+              triggerRoomClosed(
+                check.message || 'This room does not exist or has been closed by the host.'
+              );
+            }
+          });
+        }
       },
     });
     roomProviderRef.current = roomProvider;
+
+    roomProvider.on('stateless', ({ payload }: { payload: string }) => {
+      try {
+        const data = JSON.parse(payload);
+        if (data.type === 'ROOM_CLOSED') {
+          triggerRoomClosed(data.message || 'This room does not exist or has been closed by the host.');
+        }
+      } catch {}
+    });
 
     roomProvider.on('status', ({ status }: { status: string }) => {
       if (status === 'connected') {
         broadcastRoomPresence();
         updateRoomMembers();
+        verifyRoomStatus();
       }
     });
 
@@ -347,38 +466,54 @@ export function useRoomCollab({
     }
     updateRoomMembers();
 
-    // Reconnection & focus presence handlers
+    // Reconnection & focus presence & room existence handlers
     const handleWindowFocus = () => {
       broadcastRoomPresence();
       updateRoomMembers();
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        verifyRoomStatus();
+      }
     };
+    const handleOnline = () => {
+      broadcastRoomPresence();
+      updateRoomMembers();
+      verifyRoomStatus();
+    };
+
     window.addEventListener('focus', handleWindowFocus);
-    window.addEventListener('online', handleWindowFocus);
+    window.addEventListener('online', handleOnline);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         broadcastRoomPresence();
         updateRoomMembers();
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          verifyRoomStatus();
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Periodic presence heartbeat every 8 seconds to prevent awareness expiration
+    // Periodic presence heartbeat and online room existence verification
     const presenceHeartbeat = setInterval(() => {
       if (roomProviderRef.current && roomProviderRef.current.isConnected) {
         broadcastRoomPresence();
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        verifyRoomStatus();
       }
     }, 8000);
 
     return () => {
       window.removeEventListener('focus', handleWindowFocus);
-      window.removeEventListener('online', handleWindowFocus);
+      window.removeEventListener('online', handleOnline);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       clearInterval(presenceHeartbeat);
 
       if (roomAwareness) {
         roomAwareness.off('change', updateRoomMembers);
       }
+      roomMetaMap.unobserve(checkRoomMetaClosure);
       yFilesMap.unobserve(filesObserver);
       roomProvider.destroy();
       roomDoc.destroy();
@@ -386,7 +521,7 @@ export function useRoomCollab({
       roomProviderRef.current = null;
       yFilesMapRef.current = null;
     };
-  }, [roomCode, currentUser.id]);
+  }, [roomCode, currentUser.id, triggerRoomClosed]);
 
   // Update current user's active file in room awareness whenever activeFileId changes
   useEffect(() => {
@@ -543,11 +678,29 @@ export function useRoomCollab({
           offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
         }
       },
-      onClose() {
+      onClose({ event }: { event: any }) {
         wasOfflineRef.current = true;
         if (fileDocRef.current) {
           offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
           offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
+        }
+        if (
+          event?.code === 4404 ||
+          event?.reason?.includes('closed') ||
+          event?.reason?.includes('does not exist')
+        ) {
+          triggerRoomClosed(
+            event?.reason || 'This room does not exist or has been closed by the host.'
+          );
+        }
+      },
+      onAuthenticationFailed({ reason }: { reason: string }) {
+        if (
+          reason?.includes('ROOM_NOT_FOUND') ||
+          reason?.includes('does not exist') ||
+          reason?.includes('closed')
+        ) {
+          triggerRoomClosed('This room does not exist or has been closed by the host.');
         }
       },
     });
@@ -884,6 +1037,9 @@ export function useRoomCollab({
     undo: handleUndo,
     redo: handleRedo,
     syncNotice,
+    isRoomClosed,
+    closureNotice,
+    markRoomClosed,
     createFile: handleCreateFile,
     recycleFile: handleRecycleFile,
     restoreFile: handleRestoreFile,

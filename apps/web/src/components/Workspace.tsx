@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Files, Search, Users, Settings } from 'lucide-react';
+import { Files, Search, Users, Settings, AlertCircle } from 'lucide-react';
 import type * as monacoEditor from 'monaco-editor';
 import { Header } from './Header';
 import { FileExplorer } from './Sidebar/FileExplorer';
@@ -17,7 +17,7 @@ import type { Room, AuthUser, SupportedLanguage } from '@hostelcode/shared';
 interface WorkspaceProps {
   room: Room;
   currentUser: AuthUser;
-  onLeaveRoom: () => void;
+  onLeaveRoom: (notice?: string) => void;
 }
 
 export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeaveRoom }) => {
@@ -61,6 +61,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     undo,
     redo,
     syncNotice,
+    isRoomClosed,
+    closureNotice,
+    markRoomClosed,
     createFile,
     recycleFile,
     restoreFile,
@@ -80,6 +83,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     },
     editor: editorInstance,
   });
+
+  // Auto-redirect if room is closed or does not exist
+  useEffect(() => {
+    if (isRoomClosed) {
+      const timer = setTimeout(() => {
+        onLeaveRoom(closureNotice || 'This room does not exist or has been closed by the host.');
+      }, 3500);
+      return () => clearTimeout(timer);
+    }
+  }, [isRoomClosed, closureNotice, onLeaveRoom]);
 
   const activeFiles = files.filter((f) => !f.isRecycled);
   const activeFile = activeFiles.find((f) => f.id === activeFileId) || activeFiles[0];
@@ -210,6 +223,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
     if (!confirmed) return;
 
     try {
+      markRoomClosed();
       await deleteRoomOnServer(room.code, currentUser);
     } catch (err) {
       console.error('[Room] Failed to delete room:', err);
@@ -374,6 +388,27 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         }}
         characterCount={activeFile ? activeFile.content.length : 0}
       />
+
+      {/* Room Closed Overlay Modal */}
+      {isRoomClosed && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-[#1e1e1e] border border-rose-500/40 rounded-xl p-6 max-w-md w-full shadow-2xl text-center flex flex-col items-center">
+            <div className="w-14 h-14 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center mb-4 text-rose-400">
+              <AlertCircle className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-semibold text-white mb-2">Room Closed</h3>
+            <p className="text-sm text-neutral-300 mb-6 leading-relaxed">
+              {closureNotice || 'This room does not exist or has been closed by the host.'}
+            </p>
+            <button
+              onClick={() => onLeaveRoom(closureNotice || 'This room does not exist or has been closed by the host.')}
+              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-lg transition-colors shadow-lg shadow-indigo-600/30 font-sans cursor-pointer"
+            >
+              Return to Home
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

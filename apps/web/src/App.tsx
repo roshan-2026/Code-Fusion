@@ -44,13 +44,13 @@ export const App: React.FC = () => {
         setCurrentRoom(room);
         window.history.replaceState({}, '', `/?room=${code}`);
       } else {
-        // Room does not exist on server! Do NOT create a room!
-        setLoadError(`No room available with code "${code}". Please check the 6-digit code or create a new team room.`);
+        // Room does not exist or has been closed on server!
+        setLoadError('This room does not exist or has been closed by the host.');
         setCurrentRoom(null);
         window.history.replaceState({}, '', '/');
       }
     } catch (err: any) {
-      setLoadError(err?.message || 'Failed to load room');
+      setLoadError(err?.message || 'This room does not exist or has been closed by the host.');
       setCurrentRoom(null);
       window.history.replaceState({}, '', '/');
     } finally {
@@ -68,9 +68,12 @@ export const App: React.FC = () => {
     loadRoomByCode(roomCode, currentUser);
   };
 
-  const handleLeaveRoom = () => {
+  const handleLeaveRoom = (notice?: string) => {
     setCurrentRoom(null);
     window.history.replaceState({}, '', '/');
+    if (notice) {
+      setLoadError(notice);
+    }
   };
 
   const handleUserChange = (user: AuthUser | null) => {

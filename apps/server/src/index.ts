@@ -118,6 +118,59 @@ const httpServer = http.createServer(async (req, res) => {
     }
 
     try {
+      const room = getRoom(roomCode);
+      if (!room) {
+        sendJson(res, 404, { error: `Room ${roomCode} not found` });
+        return;
+      }
+
+      if (room.creatorId !== userId) {
+        sendJson(res, 403, {
+          error: 'Unauthorized: Only the room creator (admin) can delete this room',
+        });
+        return;
+      }
+
+      // Notify and disconnect all active Hocuspocus clients in real time
+      const roomDocName = `room:${roomCode}`;
+      const closureMessage = 'This room does not exist or has been closed by the host.';
+      const closurePayload = JSON.stringify({
+        type: 'ROOM_CLOSED',
+        roomCode,
+        message: closureMessage,
+      });
+
+      const docsToUnload: any[] = [];
+      hocuspocus.documents.forEach((doc, docName) => {
+        if (docName === roomDocName || docName.startsWith(`project:${roomCode}:`)) {
+          try {
+            doc.broadcastStateless(closurePayload);
+            const connections = doc.getConnections ? doc.getConnections() : [];
+            connections.forEach((conn: any) => {
+              try {
+                conn.sendStateless?.(closurePayload);
+                conn.webSocket?.close(4404, closureMessage);
+                conn.close?.({ code: 4404, reason: closureMessage });
+              } catch (e) {
+                console.warn('[Hocuspocus] Error closing connection for deleted room:', e);
+              }
+            });
+          } catch (e) {
+            console.warn('[Hocuspocus] Error broadcasting closure on doc:', e);
+          }
+          docsToUnload.push(doc);
+        }
+      });
+
+      for (const doc of docsToUnload) {
+        try {
+          doc.destroy?.();
+          hocuspocus.unloadDocument(doc);
+        } catch (e) {
+          console.warn('[Hocuspocus] Error unloading document:', e);
+        }
+      }
+
       const success = deleteRoom(roomCode, userId);
       if (success) {
         sendJson(res, 200, { success: true, message: `Room ${roomCode} deleted permanently` });
@@ -141,6 +194,28 @@ const httpServer = http.createServer(async (req, res) => {
     } catch (err: any) {
       sendJson(res, 500, { error: err.message || 'Failed to clear database' });
     }
+    return;
+  }
+
+  // 2e. GET /api/rooms/:code/status — Lightweight endpoint to verify if a room is active or closed
+  const roomStatusMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/status$/);
+  if (roomStatusMatch && req.method === 'GET') {
+    const roomCode = roomStatusMatch[1].toUpperCase();
+    const room = getRoom(roomCode);
+    if (!room) {
+      sendJson(res, 404, {
+        exists: false,
+        status: 'closed',
+        error: 'This room does not exist or has been closed by the host.',
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      exists: true,
+      status: 'active',
+      code: room.code,
+      name: room.name,
+    });
     return;
   }
 
@@ -191,7 +266,7 @@ const httpServer = http.createServer(async (req, res) => {
 
     const room = getRoom(roomCode);
     if (!room) {
-      sendJson(res, 404, { error: `Room ${roomCode} does not exist` });
+      sendJson(res, 404, { error: 'This room does not exist or has been closed by the host.' });
       return;
     }
 

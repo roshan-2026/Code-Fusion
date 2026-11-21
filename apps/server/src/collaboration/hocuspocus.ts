@@ -21,10 +21,11 @@ export function createHocuspocusServer(): Hocuspocus {
         throw new Error(auth.error || 'Unauthorized: invalid or missing authentication token');
       }
 
-      const isAuthorized = await authorizeDocumentAccess(auth.user, documentName);
-      if (!isAuthorized) {
+      const authCheck = await authorizeDocumentAccess(auth.user, documentName);
+      if (!authCheck.authorized) {
         throw new Error(
-          `Forbidden: You must be a joined member of this room to access "${documentName}"`
+          authCheck.error ||
+            `Forbidden: You must be a joined member of this room to access "${documentName}"`
         );
       }
 

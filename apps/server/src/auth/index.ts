@@ -59,6 +59,12 @@ export async function authenticateConnection(
   };
 }
 
+export interface AuthorizationResult {
+  authorized: boolean;
+  reason?: 'ROOM_NOT_FOUND' | 'FORBIDDEN' | 'INVALID_FORMAT';
+  error?: string;
+}
+
 /**
  * Verifies if user has permission to access the project/document.
  * Supports both room-level documents (room:ROOMCODE) and file-level documents (project:ROOMCODE:file:FILEID).
@@ -67,7 +73,7 @@ export async function authenticateConnection(
 export async function authorizeDocumentAccess(
   user: AuthUser,
   documentName: string
-): Promise<boolean> {
+): Promise<AuthorizationResult> {
   let roomCode: string | null = null;
 
   if (documentName.startsWith('room:')) {
@@ -79,32 +85,40 @@ export async function authorizeDocumentAccess(
 
   if (!roomCode) {
     console.warn(`[Auth Security] Invalid document identifier format: "${documentName}"`);
-    return false;
+    return {
+      authorized: false,
+      reason: 'INVALID_FORMAT',
+      error: 'Invalid document identifier format',
+    };
   }
 
-  // 1. Check existing room membership
+  // 1. Verify if the room exists in the database first
+  const room = getRoom(roomCode);
+  if (!room) {
+    console.warn(
+      `[Auth Security] Rejected user ${user.name} (${user.id}) from document "${documentName}" — Room ${roomCode} does not exist.`
+    );
+    return {
+      authorized: false,
+      reason: 'ROOM_NOT_FOUND',
+      error: 'ROOM_NOT_FOUND: This room does not exist or has been closed by the host.',
+    };
+  }
+
+  // 2. Check existing room membership
   let isMember = isUserMemberOfRoom(roomCode, user.id);
   if (isMember) {
-    return true;
+    return { authorized: true };
   }
 
-  // 2. If not registered yet, verify the room actually exists
-  const room = getRoom(roomCode);
-  if (room) {
-    // Valid room: authorize and register user as room member
-    addRoomMember(roomCode, {
-      id: user.id,
-      name: user.name,
-      email: user.email || '',
-    });
-    console.log(
-      `[Auth Security] Auto-authorized member ${user.name} (${user.id}) for room ${roomCode}`
-    );
-    return true;
-  }
-
-  console.warn(
-    `[Auth Security] Rejected user ${user.name} (${user.id}) from document "${documentName}" — Room ${roomCode} does not exist.`
+  // 3. Room is valid: auto-register user as room member
+  addRoomMember(roomCode, {
+    id: user.id,
+    name: user.name,
+    email: user.email || '',
+  });
+  console.log(
+    `[Auth Security] Auto-authorized member ${user.name} (${user.id}) for room ${roomCode}`
   );
-  return false;
+  return { authorized: true };
 }
