@@ -68,11 +68,13 @@ export const App: React.FC = () => {
     loadRoomByCode(roomCode, currentUser);
   };
 
-  const handleLeaveRoom = (notice?: string) => {
+  const handleLeaveRoom = (notice?: any) => {
     setCurrentRoom(null);
     window.history.replaceState({}, '', '/');
-    if (notice) {
-      setLoadError(notice);
+    if (typeof notice === 'string' && notice.trim().length > 0) {
+      setLoadError(notice.trim());
+    } else {
+      setLoadError(null);
     }
   };
 

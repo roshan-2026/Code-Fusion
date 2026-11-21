@@ -108,6 +108,7 @@ export class MonacoCollabBinding {
     string[]
   > = new Map();
   private _offlineHighlightTimers: (ReturnType<typeof setTimeout>)[] = [];
+  private _isDestroyed: boolean = false;
   private _rerenderDecorations: () => void;
   private _ytextObserver: (event: Y.YTextEvent) => void;
   private _monacoChangeHandler: monaco.IDisposable;
@@ -234,9 +235,9 @@ export class MonacoCollabBinding {
           }
         });
 
-        // Add translucent character-level edit highlight strictly for live remote snippet insertions
+        // Add translucent character-level edit highlight strictly for live snippet insertions
         if (this._allowLiveHighlights && !isInitialTransaction && insertedSnippets.length > 0) {
-          this._addRemoteEditHighlights(insertedSnippets);
+          this._addEditHighlights(insertedSnippets);
         }
 
         // Restore local selections: thanks to assoc = -1, caret cursors at insertion points
@@ -278,6 +279,36 @@ export class MonacoCollabBinding {
             this.ytext.insert(change.rangeOffset, change.text);
           });
         }, this);
+
+        // Highlight local user's edits permanently in their unique color
+        if (this._allowLiveHighlights) {
+          const localSnippets: { range: monaco.Range; clientId: number }[] = [];
+          event.changes.forEach((change) => {
+            if (change.text.length > 0) {
+              const startPos = this.monacoModel.getPositionAt(change.rangeOffset);
+              const endPos = this.monacoModel.getPositionAt(
+                change.rangeOffset + change.text.length
+              );
+              if (
+                startPos.lineNumber !== endPos.lineNumber ||
+                startPos.column !== endPos.column
+              ) {
+                localSnippets.push({
+                  range: new monaco.Range(
+                    startPos.lineNumber,
+                    startPos.column,
+                    endPos.lineNumber,
+                    endPos.column
+                  ),
+                  clientId: this.doc.clientID,
+                });
+              }
+            }
+          });
+          if (localSnippets.length > 0) {
+            this._addEditHighlights(localSnippets);
+          }
+        }
       });
     });
 
@@ -426,9 +457,10 @@ export class MonacoCollabBinding {
 
   /**
    * Dynamically adds and merges character-level translucent edit highlights
-   * strictly for newly edited snippets of code (never whole lines).
+   * strictly for edited snippets of code (never whole lines), persisting permanently
+   * in the unique color of the user who committed the change.
    */
-  private _addRemoteEditHighlights(
+  private _addEditHighlights(
     snippets: { range: monaco.Range; clientId: number }[]
   ): void {
     this.editors.forEach((editor) => {
@@ -441,21 +473,35 @@ export class MonacoCollabBinding {
       }
 
       snippets.forEach((snippet) => {
-        const state = this.awareness?.getStates().get(snippet.clientId);
-        const userName = (state?.user?.name || 'Peer').replace(/"/g, '\\"');
-        const userColor = state?.user?.color || '#3B82F6';
+        const isMe = snippet.clientId === this.doc.clientID;
+        const awarenessState = this.awareness?.getStates().get(snippet.clientId);
+        const metaMap = this.doc.getMap<any>('_clientMeta');
+        const clientMeta = metaMap.get(String(snippet.clientId));
+        const localUser = this.awareness?.getLocalState()?.user;
 
-        // Ensure dynamic CSS rule exists for this peer's unique color
+        const rawName =
+          (isMe ? localUser?.name : null) ||
+          clientMeta?.name ||
+          awarenessState?.user?.name ||
+          (isMe ? 'You' : 'Peer');
+        const userName = rawName.replace(/"/g, '\\"');
+        const userColor =
+          (isMe ? localUser?.color : null) ||
+          clientMeta?.color ||
+          awarenessState?.user?.color ||
+          '#6366F1';
+
+        // Ensure dynamic CSS rule exists for this user's unique color
         ensureUserEditStyle(snippet.clientId, userColor, userName);
 
-        // Check if there is an existing recent highlight for this client that touches or is adjacent
+        // Check if there is an existing highlight for this client that touches or is adjacent
         let existingToMerge: ActiveEditHighlight | null = null;
         let mergedRange: monaco.Range = snippet.range;
 
         for (const [, highlight] of editorHighlights!) {
           if (highlight.clientId === snippet.clientId) {
             const currentRange = editor.getModel()?.getDecorationRange(highlight.id);
-            if (currentRange) {
+            if (currentRange && !currentRange.isEmpty()) {
               const isAdjacentOrOverlapping =
                 (currentRange.endLineNumber === snippet.range.startLineNumber &&
                   Math.abs(currentRange.endColumn - snippet.range.startColumn) <= 2) ||
@@ -494,12 +540,20 @@ export class MonacoCollabBinding {
           }
         }
 
+        const hoverText = isMe
+          ? `✍️ **You (${userName})** edited this snippet`
+          : `✍️ **${userName}** edited this snippet`;
+
         const decorationOptions: monaco.editor.IModelDecorationOptions = {
           isWholeLine: false, // Strictly snippet only, NEVER whole line!
           className: `yRemoteEdit yRemoteEdit-${snippet.clientId}`,
           inlineClassName: `yRemoteEditInline yRemoteEditInline-${snippet.clientId}`,
           hoverMessage: {
-            value: `✍️ **${userName}** edited this snippet (visible for 15s)`,
+            value: hoverText,
+          },
+          overviewRuler: {
+            color: userColor,
+            position: 4,
           },
           stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
           zIndex: 10,
@@ -507,8 +561,6 @@ export class MonacoCollabBinding {
 
         const oldIds = existingToMerge ? [existingToMerge.id] : [];
         if (existingToMerge) {
-          if (existingToMerge.fadeTimer) clearTimeout(existingToMerge.fadeTimer);
-          if (existingToMerge.removeTimer) clearTimeout(existingToMerge.removeTimer);
           editorHighlights!.delete(existingToMerge.id);
         }
 
@@ -530,28 +582,7 @@ export class MonacoCollabBinding {
             removeTimer: null,
           };
 
-          // Visible for 15 seconds! Trigger smooth CSS fadeout at 15 seconds
-          entry.fadeTimer = setTimeout(() => {
-            const currentRange = editor.getModel()?.getDecorationRange(decId);
-            if (currentRange) {
-              editor.deltaDecorations([decId], [
-                {
-                  range: currentRange,
-                  options: {
-                    ...decorationOptions,
-                    className: `yRemoteEdit yRemoteEdit-${snippet.clientId} yRemoteEdit-fading`,
-                  },
-                },
-              ]);
-            }
-          }, 15000);
-
-          // After smooth 2s CSS dissolution, remove decoration completely at 17 seconds
-          entry.removeTimer = setTimeout(() => {
-            editor.deltaDecorations([decId], []);
-            editorHighlights?.delete(decId);
-          }, 17000);
-
+          // Permanent edit highlight: stays active so users can check who edited where at any point
           editorHighlights!.set(decId, entry);
         }
       });
@@ -725,7 +756,7 @@ export class MonacoCollabBinding {
             className: `yRemoteEdit yRemoteEdit-${snippet.clientId}`,
             inlineClassName: `yRemoteEditInline yRemoteEditInline-${snippet.clientId}`,
             hoverMessage: {
-              value: `✍️ **${userName}** edited this while you were offline (visible for 2 min)`,
+              value: `✍️ **${userName}** edited this snippet`,
             },
             overviewRuler: {
               color: userColor,
@@ -740,52 +771,7 @@ export class MonacoCollabBinding {
       if (newDecorations.length > 0) {
         const appliedIds = editor.deltaDecorations([], newDecorations);
         this._offlineHighlightDecorations.set(editor, appliedIds);
-
-        // Visible for at least 2 minutes (120,000ms). Trigger smooth 2.5s CSS fade dissolution at 120,000ms
-        const fadeTimer = setTimeout(() => {
-          try {
-            const currentIds = this._offlineHighlightDecorations.get(editor) || [];
-            if (currentIds.length === 0) return;
-
-            const fadingDecorations: monaco.editor.IModelDeltaDecoration[] = [];
-            currentIds.forEach((id) => {
-              const decRange = editor.getModel()?.getDecorationRange(id);
-              if (decRange) {
-                fadingDecorations.push({
-                  range: decRange,
-                  options: {
-                    isWholeLine: false,
-                    className: `yRemoteEdit yRemoteEdit-fading`,
-                    inlineClassName: `yRemoteEditInline`,
-                    hoverMessage: {
-                      value: `✍️ Edited while offline (fading)`,
-                    },
-                    stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
-                    zIndex: 10,
-                  },
-                });
-              }
-            });
-
-            if (fadingDecorations.length > 0) {
-              const fadingIds = editor.deltaDecorations(currentIds, fadingDecorations);
-              this._offlineHighlightDecorations.set(editor, fadingIds);
-            }
-          } catch {}
-        }, 120000);
-
-        // Dispose completely after smooth dissolution at 122,500ms
-        const removeTimer = setTimeout(() => {
-          try {
-            const idsToRemove = this._offlineHighlightDecorations.get(editor) || [];
-            if (idsToRemove.length > 0) {
-              editor.deltaDecorations(idsToRemove, []);
-            }
-            this._offlineHighlightDecorations.delete(editor);
-          } catch {}
-        }, 122500);
-
-        this._offlineHighlightTimers.push(fadeTimer, removeTimer);
+        // Permanent edit highlight: stays active so users can check who edited where at any point
       }
     });
 
@@ -805,16 +791,33 @@ export class MonacoCollabBinding {
   }
 
   destroy(): void {
-    this._monacoChangeHandler.dispose();
-    this._monacoDisposeHandler.dispose();
-    this._cursorListeners.forEach((l) => l.dispose());
+    if (this._isDestroyed) return;
+    this._isDestroyed = true;
+
+    try {
+      this._monacoChangeHandler.dispose();
+    } catch {}
+    try {
+      this._monacoDisposeHandler.dispose();
+    } catch {}
+    this._cursorListeners.forEach((l) => {
+      try {
+        l.dispose();
+      } catch {}
+    });
     this._cursorListeners = [];
 
-    this.ytext.unobserve(this._ytextObserver);
-    this.doc.off('beforeAllTransactions', this._beforeTransaction);
+    try {
+      this.ytext.unobserve(this._ytextObserver);
+    } catch {}
+    try {
+      this.doc.off('beforeAllTransactions', this._beforeTransaction);
+    } catch {}
 
     if (this.awareness) {
-      this.awareness.off('change', this._rerenderDecorations);
+      try {
+        this.awareness.off('change', this._rerenderDecorations);
+      } catch {}
     }
 
     // Clear cursor decorations
@@ -828,14 +831,9 @@ export class MonacoCollabBinding {
     });
     this._decorations.clear();
 
-    // Clear all snippet edit highlights and their timers
+    // Clear all snippet edit highlights
     this._editDecorations.forEach((highlightsMap, editor) => {
-      const decIds: string[] = [];
-      highlightsMap.forEach((entry) => {
-        if (entry.fadeTimer) clearTimeout(entry.fadeTimer);
-        if (entry.removeTimer) clearTimeout(entry.removeTimer);
-        decIds.push(entry.id);
-      });
+      const decIds = Array.from(highlightsMap.keys());
       if (decIds.length > 0) {
         try {
           editor.deltaDecorations(decIds, []);
@@ -844,7 +842,7 @@ export class MonacoCollabBinding {
     });
     this._editDecorations.clear();
 
-    // Clear offline highlights and timers
+    // Clear offline highlights
     this._offlineHighlightTimers.forEach((t) => clearTimeout(t));
     this._offlineHighlightTimers = [];
 

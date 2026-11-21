@@ -16,7 +16,7 @@ export function saveRoomLocally(room: Room): void {
     const recent = getRecentRooms();
     const updatedRecent = [
       room,
-      ...recent.filter((r) => r.code.toUpperCase() !== room.code.toUpperCase()),
+      ...recent.filter((r) => r && r.code && r.code.toUpperCase() !== room.code.toUpperCase()),
     ].slice(0, 8); // Keep last 8 rooms
 
     localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(updatedRecent));
@@ -60,7 +60,7 @@ export function purgeRoomLocally(code: string): void {
   try {
     const cleanCode = code.trim().toUpperCase();
     localStorage.removeItem(`${CACHE_PREFIX}${cleanCode}`);
-    const recent = getRecentRooms().filter((r) => r.code.toUpperCase() !== cleanCode);
+    const recent = getRecentRooms().filter((r) => r && r.code && r.code.toUpperCase() !== cleanCode);
     localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
     console.log(`[RoomStorage] Purged room ${cleanCode} from local storage`);
   } catch (err) {
@@ -266,7 +266,7 @@ export async function fetchUserCreatedRooms(user: AuthUser): Promise<Room[]> {
     console.warn('[RoomStorage] Failed to fetch user rooms from server, using local fallback:', err);
   }
 
-  return getRecentRooms().filter((r) => r.creatorId === user.id);
+  return getRecentRooms().filter((r) => r && r.creatorId === user.id);
 }
 
 /**

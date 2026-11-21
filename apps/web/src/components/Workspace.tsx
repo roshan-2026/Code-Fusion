@@ -240,7 +240,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ room, currentUser, onLeave
         members={members}
         currentUser={currentUser}
         isAdmin={isAdmin}
-        onLeaveRoom={onLeaveRoom}
+        onLeaveRoom={() => onLeaveRoom()}
         onDeleteRoom={handleDeleteRoom}
         onOpenMembers={() => setActiveSidebar('members')}
       />

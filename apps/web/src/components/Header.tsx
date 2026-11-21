@@ -44,7 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-center gap-3">
         {onLeaveRoom && (
           <button
-            onClick={onLeaveRoom}
+            onClick={() => onLeaveRoom()}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#252526] hover:bg-[#333333] border border-[#3c3c3c] text-neutral-300 hover:text-white transition-colors"
             title="Leave room and return to Home"
           >

@@ -245,7 +245,7 @@ export const HomePage: React.FC<HomePageProps> = ({
       {/* Hero Section */}
       <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-12 flex flex-col items-center text-center">
         {/* Load / Validation Error Banner */}
-        {loadError && (
+        {loadError && typeof loadError === 'string' && (
           <div className="w-full max-w-xl mx-auto mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-left">
               <span className="font-bold text-rose-200 uppercase tracking-wide">Notice:</span>

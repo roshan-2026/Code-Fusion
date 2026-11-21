@@ -737,7 +737,7 @@ export function useRoomCollab({
                 const authorsStr =
                   result.authors.length > 0 ? result.authors.join(', ') : 'team';
                 setSyncNotice(
-                  `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors (visible for 2 min).`
+                  `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors.`
                 );
                 setTimeout(() => setSyncNotice(null), 25000);
               }
@@ -869,7 +869,7 @@ export function useRoomCollab({
             const authorsStr =
               result.authors.length > 0 ? result.authors.join(', ') : 'team';
             setSyncNotice(
-              `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors (visible for 2 min).`
+              `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors.`
             );
             setTimeout(() => setSyncNotice(null), 25000);
           }
