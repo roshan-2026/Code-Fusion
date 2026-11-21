@@ -135,68 +135,9 @@ export function useRoomCollab({
 
   // Offline highlight tracking
   const wasOfflineRef = useRef<boolean>(false);
+  const offlineStateVectorRef = useRef<Uint8Array | null>(null);
+  const pendingOfflineHighlightVectorRef = useRef<Uint8Array | null>(null);
   const offlineBaselineTextRef = useRef<string | null>(null);
-  const decorationsRef = useRef<any>(null);
-
-  // Helper to apply semi-transparent yellow highlight to synced lines
-  const applyYellowHighlights = useCallback(
-    (ed: monacoEditor.editor.IStandaloneCodeEditor, lines: number[]) => {
-      try {
-        const model = ed.getModel();
-        if (!model) return;
-
-        const maxLine = model.getLineCount();
-        const validLines = lines.filter((l) => l >= 1 && l <= maxLine);
-        if (validLines.length === 0) return;
-
-        const newDecorations = validLines.map((lineNumber) => ({
-          range: {
-            startLineNumber: lineNumber,
-            startColumn: 1,
-            endLineNumber: lineNumber,
-            endColumn: model.getLineMaxColumn(lineNumber),
-          },
-          options: {
-            isWholeLine: true,
-            className: 'hostelcode-offline-sync-highlight',
-            overviewRuler: {
-              color: '#EAB308',
-              position: 4,
-            },
-            hoverMessage: {
-              value: '⚡ **Synced from Offline User**: Changes merged cleanly without duplicate text.',
-            },
-          },
-        }));
-
-        if ((ed as any).createDecorationsCollection) {
-          if (decorationsRef.current) {
-            decorationsRef.current.clear();
-          }
-          decorationsRef.current = (ed as any).createDecorationsCollection(newDecorations);
-        } else {
-          (ed as any)._offlineDecs = ed.deltaDecorations(
-            (ed as any)._offlineDecs || [],
-            newDecorations
-          );
-        }
-
-        setTimeout(() => {
-          try {
-            if (decorationsRef.current) {
-              decorationsRef.current.clear();
-              decorationsRef.current = null;
-            } else if ((ed as any)._offlineDecs) {
-              (ed as any)._offlineDecs = ed.deltaDecorations((ed as any)._offlineDecs, []);
-            }
-          } catch {}
-        }, 20000);
-      } catch (err) {
-        console.warn('[Collab] Failed to apply yellow highlight:', err);
-      }
-    },
-    []
-  );
 
   // =========================================================================
   // 1. ROOM PROVIDER: Manages Room Awareness & Real-Time CRDT Files Map
@@ -391,12 +332,36 @@ export function useRoomCollab({
       }
     };
 
+    const registerClientMeta = () => {
+      if (!fileDocRef.current) return;
+      try {
+        const metaMap = fileDocRef.current.getMap<any>('_clientMeta');
+        metaMap.set(String(fileDocRef.current.clientID), {
+          id: currentUser.id,
+          name: currentUser.name,
+          email: currentUser.email,
+          color: currentUser.color,
+        });
+      } catch {}
+    };
+    registerClientMeta();
+
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
     fileIndexeddbRef.current = fileIndexeddb;
 
     fileIndexeddb.once('synced', () => {
       seedIfEmpty();
+      registerClientMeta();
+      // If we loaded cached content from previous offline session, snapshot as baseline
+      if (!offlineStateVectorRef.current && fileDocRef.current) {
+        offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+        const cached = fileDocRef.current.getText('monaco').toString();
+        if (cached && cached.length > 0) {
+          offlineBaselineTextRef.current = cached;
+          wasOfflineRef.current = true;
+        }
+      }
     });
 
     const fileProvider = new HocuspocusProvider({
@@ -408,42 +373,69 @@ export function useRoomCollab({
         name: currentUser.name,
         email: currentUser.email,
       }),
+      onConnect() {
+        registerClientMeta();
+      },
       onSynced() {
         seedIfEmpty();
+        registerClientMeta();
 
-        // Safely reconcile offline edits without destroying document history
+        // Safely reconcile offline edits and highlight snippets in author unique colors
         if (wasOfflineRef.current) {
-          const affectedLines = reconcileOfflineSync(
+          reconcileOfflineSync(
             fileDoc,
             offlineBaselineTextRef.current
           );
 
-          if (affectedLines.length > 0 && editor) {
-            applyYellowHighlights(editor, affectedLines);
-            setSyncNotice(
-              `⚡ Synced changes (${affectedLines.length} line(s) merged & highlighted in yellow).`
-            );
-            setTimeout(() => setSyncNotice(null), 8000);
+          if (offlineStateVectorRef.current) {
+            if (bindingRef.current) {
+              const result = bindingRef.current.highlightOfflineEdits(
+                offlineStateVectorRef.current,
+                knownMembersRef.current
+              );
+              if (result.count > 0) {
+                const authorsStr =
+                  result.authors.length > 0 ? result.authors.join(', ') : 'team';
+                setSyncNotice(
+                  `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors (visible for 2 min).`
+                );
+                setTimeout(() => setSyncNotice(null), 25000);
+              }
+            } else {
+              pendingOfflineHighlightVectorRef.current = offlineStateVectorRef.current;
+            }
           }
 
           wasOfflineRef.current = false;
+          offlineStateVectorRef.current = null;
           offlineBaselineTextRef.current = null;
         }
       },
       onDisconnect() {
         wasOfflineRef.current = true;
         if (fileDocRef.current) {
+          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
           offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
         }
       },
       onClose() {
         wasOfflineRef.current = true;
         if (fileDocRef.current) {
+          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
           offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
         }
       },
     });
     fileProviderRef.current = fileProvider;
+
+    const handleBrowserOffline = () => {
+      wasOfflineRef.current = true;
+      if (fileDocRef.current) {
+        offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+        offlineBaselineTextRef.current = fileDocRef.current.getText('monaco').toString();
+      }
+    };
+    window.addEventListener('offline', handleBrowserOffline);
 
     const fileAwareness = fileProvider.awareness;
     const handleAwarenessChange = () => {
@@ -473,6 +465,23 @@ export function useRoomCollab({
           fileAwareness
         );
         bindingRef.current = binding;
+
+        // If an offline highlight was pending waiting for the editor binding
+        if (pendingOfflineHighlightVectorRef.current) {
+          const result = binding.highlightOfflineEdits(
+            pendingOfflineHighlightVectorRef.current,
+            knownMembersRef.current
+          );
+          if (result.count > 0) {
+            const authorsStr =
+              result.authors.length > 0 ? result.authors.join(', ') : 'team';
+            setSyncNotice(
+              `⚡ Reconnected: ${result.count} change(s) by ${authorsStr} highlighted in their unique colors (visible for 2 min).`
+            );
+            setTimeout(() => setSyncNotice(null), 25000);
+          }
+          pendingOfflineHighlightVectorRef.current = null;
+        }
 
         // Per-User UndoManager (only tracks local user edits)
         const undoManager = new Y.UndoManager(yText, {
@@ -513,6 +522,7 @@ export function useRoomCollab({
     }
 
     return () => {
+      window.removeEventListener('offline', handleBrowserOffline);
       if (fileAwareness) {
         fileAwareness.off('change', handleAwarenessChange);
       }
@@ -524,17 +534,13 @@ export function useRoomCollab({
         bindingRef.current.destroy();
         bindingRef.current = null;
       }
-      if (decorationsRef.current) {
-        decorationsRef.current.clear();
-        decorationsRef.current = null;
-      }
       fileProvider.destroy();
       fileIndexeddb.destroy();
       fileDoc.destroy();
       fileDocRef.current = null;
       fileProviderRef.current = null;
     };
-  }, [roomCode, activeFileId, currentUser.id, editor, applyYellowHighlights]);
+  }, [roomCode, activeFileId, currentUser.id, editor]);
 
   // =========================================================================
   // 3. REAL-TIME FILE ACTIONS (Instant Yjs CRDT Broadcast across all peers)

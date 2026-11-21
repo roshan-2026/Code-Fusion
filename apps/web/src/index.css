@@ -35,9 +35,15 @@ html, body {
   background: #4f4f4f;
 }
 
-/* Semi-transparent yellow highlight for code synced from offline user */
+/* Semi-transparent yellow highlight for code synced from offline user (persists for 2+ minutes) */
 .hostelcode-offline-sync-highlight {
   background-color: rgba(234, 179, 8, 0.28) !important;
   border-left: 3px solid #eab308 !important;
+  transition: background-color 2.5s ease-out, border-color 2.5s ease-out;
+}
+
+.hostelcode-offline-sync-highlight.hostelcode-offline-sync-fading {
+  background-color: transparent !important;
+  border-left-color: transparent !important;
 }
 

@@ -3,9 +3,46 @@ import type { Awareness } from 'y-protocols/awareness';
 const STYLE_ELEMENT_ID = 'hostelcode-dynamic-cursors';
 
 /**
+ * Ensures a specific client's dynamic CSS rules exist in the document,
+ * even if that peer is not currently connected in awareness.
+ */
+export function ensureUserEditStyle(clientID: number, color: string, _name?: string): void {
+  let styleEl = document.getElementById(STYLE_ELEMENT_ID) as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = STYLE_ELEMENT_ID;
+    document.head.appendChild(styleEl);
+  }
+
+  if (
+    styleEl.textContent?.includes(`.yRemoteEdit-${clientID} `) ||
+    styleEl.textContent?.includes(`.yRemoteEdit-${clientID}{`)
+  ) {
+    return;
+  }
+
+  const css = `
+    /* Remote edit highlight for client ${clientID}${_name ? ` (${_name})` : ''} */
+    .yRemoteEdit-${clientID} {
+      background-color: ${color}38 !important;
+      border-bottom: 2px solid ${color}B3 !important;
+      border-radius: 2px !important;
+      box-shadow: 0 0 6px ${color}26 !important;
+      transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
+    }
+    .yRemoteEdit-${clientID}.yRemoteEdit-fading {
+      background-color: transparent !important;
+      border-bottom-color: transparent !important;
+      box-shadow: none !important;
+    }
+  `;
+  styleEl.textContent += css;
+}
+
+/**
  * Injects and dynamically updates CSS rules for Monaco Editor remote cursors
- * based on Yjs Awareness client states, including collision stacking when multiple
- * users share the same line and column.
+ * and translucent snippet edit highlights based on Yjs Awareness client states,
+ * including collision stacking when multiple users share the same line and column.
  */
 export function updateCursorStyles(awareness: Awareness): void {
   let styleEl = document.getElementById(STYLE_ELEMENT_ID) as HTMLStyleElement | null;
@@ -64,6 +101,20 @@ export function updateCursorStyles(awareness: Awareness): void {
     .yRemoteSelectionHead.yRemoteSelectionHead-stack-4::before {
       top: -6.6em !important;
     }
+
+    /* Base styles for translucent snippet edit highlights (strictly character-level, never whole line) */
+    .yRemoteEdit {
+      background-color: rgba(99, 102, 241, 0.22);
+      border-bottom: 2px solid rgba(99, 102, 241, 0.6);
+      border-radius: 2px;
+      box-sizing: border-box;
+      pointer-events: auto;
+      z-index: 10;
+      transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
+    }
+    .yRemoteEditInline {
+      color: inherit !important;
+    }
   `;
 
   const states = awareness.getStates();
@@ -73,9 +124,12 @@ export function updateCursorStyles(awareness: Awareness): void {
       const name = (state.user.name || 'Peer').replace(/"/g, '\\"');
 
       css += `
+        /* Remote selection range */
         .yRemoteSelection-${clientID} {
           background-color: ${color}33 !important;
         }
+
+        /* Remote cursor caret */
         .yRemoteSelectionHead-${clientID} {
           border-left: 2.5px solid ${color} !important;
           border-top: none !important;
@@ -108,6 +162,20 @@ export function updateCursorStyles(awareness: Awareness): void {
           border-radius: 4px;
           left: -4px;
           top: -5px;
+        }
+
+        /* Translucent snippet edit highlight for peer ${name} */
+        .yRemoteEdit-${clientID} {
+          background-color: ${color}38 !important; /* ~22% translucent opacity */
+          border-bottom: 2px solid ${color}B3 !important; /* distinct colored underline */
+          border-radius: 2px !important;
+          box-shadow: 0 0 6px ${color}26 !important;
+          transition: background-color 2.5s ease-out, border-color 2.5s ease-out, box-shadow 2.5s ease-out;
+        }
+        .yRemoteEdit-${clientID}.yRemoteEdit-fading {
+          background-color: transparent !important;
+          border-bottom-color: transparent !important;
+          box-shadow: none !important;
         }
       `;
     }
