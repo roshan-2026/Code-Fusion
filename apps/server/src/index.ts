@@ -19,8 +19,10 @@ import {
   clearDatabase,
   getYDocUpdate,
   saveYDocUpdate,
+  saveFileEditLogs,
+  getFileEditLogs,
 } from './persistence/database.js';
-import type { HealthCheckResponse, Room, ProjectFile } from '@hostelcode/shared';
+import type { HealthCheckResponse, Room, ProjectFile, FileEditLogEntry } from '@hostelcode/shared';
 
 const startTime = Date.now();
 const hocuspocus = createHocuspocusServer();
@@ -428,6 +430,34 @@ const httpServer = http.createServer(async (req, res) => {
       sendJson(res, 400, { error: err.message || 'Failed to record delete vote' });
     }
     return;
+  }
+
+  // 10. GET & POST /api/rooms/:code/files/:fileId/edits — File Edit Logs (Permanent database storage)
+  const fileEditsMatch = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{6})\/files\/([^/]+)\/edits$/);
+  if (fileEditsMatch) {
+    const roomCode = fileEditsMatch[1].toUpperCase();
+    const fileId = fileEditsMatch[2];
+
+    if (req.method === 'GET') {
+      const edits = getFileEditLogs(roomCode, fileId);
+      sendJson(res, 200, { success: true, edits });
+      return;
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const body = await parseJsonBody<{ edits: FileEditLogEntry[] }>(req);
+        if (body && Array.isArray(body.edits)) {
+          saveFileEditLogs(roomCode, fileId, body.edits);
+          sendJson(res, 200, { success: true, count: body.edits.length });
+        } else {
+          sendJson(res, 400, { error: 'edits array required' });
+        }
+      } catch (err: any) {
+        sendJson(res, 400, { error: err.message || 'Failed to save edits' });
+      }
+      return;
+    }
   }
 
   // Root Info

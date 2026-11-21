@@ -10,8 +10,16 @@ import {
   type Hocuspocus,
 } from '@hocuspocus/server';
 import { parseDocumentName } from '@hostelcode/shared';
+import type { FileEditLogEntry } from '@hostelcode/shared';
 import { authenticateConnection, authorizeDocumentAccess } from '../auth/index.js';
-import { getYDocUpdate, saveYDocUpdate, getRoomFile, getRoom } from '../persistence/database.js';
+import {
+  getYDocUpdate,
+  saveYDocUpdate,
+  getRoomFile,
+  getRoom,
+  saveFileEditLogs,
+  getFileEditLogs,
+} from '../persistence/database.js';
 
 /**
  * Deduplicates exact repeated halves or identical chunk repetitions
@@ -148,6 +156,24 @@ export function createHocuspocusServer(): Hocuspocus {
           saveYDocUpdate(documentName, update);
           console.log(`[Hocuspocus Server] Deduplicated duplicate halves in: ${documentName}`);
         }
+
+        // Sync file edit history logs from SQLite database into Y.Doc
+        const docInfo = parseDocumentName(documentName);
+        if (docInfo) {
+          const roomCode = docInfo.projectId.trim().toUpperCase();
+          const fileId = docInfo.fileId;
+          const dbEdits = getFileEditLogs(roomCode, fileId);
+          if (dbEdits.length > 0) {
+            const editsMap = data.document.getMap<FileEditLogEntry>('file-edits-log');
+            data.document.transact(() => {
+              dbEdits.forEach((entry) => {
+                if (!editsMap.has(entry.id)) {
+                  editsMap.set(entry.id, entry);
+                }
+              });
+            }, 'db-edits-sync');
+          }
+        }
       }
 
       return data.document;
@@ -164,6 +190,18 @@ export function createHocuspocusServer(): Hocuspocus {
       const { documentName, document } = data;
       if (documentName.startsWith('project:')) {
         deduplicateDocRepetitions(document);
+
+        // Persist file edit logs to SQLite database
+        const docInfo = parseDocumentName(documentName);
+        if (docInfo) {
+          const roomCode = docInfo.projectId.trim().toUpperCase();
+          const fileId = docInfo.fileId;
+          const editsMap = document.getMap<FileEditLogEntry>('file-edits-log');
+          if (editsMap && editsMap.size > 0) {
+            const edits = Array.from(editsMap.values()) as FileEditLogEntry[];
+            saveFileEditLogs(roomCode, fileId, edits);
+          }
+        }
       }
       // Persist binary Yjs CRDT update to SQLite database
       const update = Y.encodeStateAsUpdate(document);

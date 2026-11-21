@@ -1,4 +1,4 @@
-import type { Room, ProjectFile, AuthUser } from '@hostelcode/shared';
+import type { Room, ProjectFile, AuthUser, FileEditLogEntry } from '@hostelcode/shared';
 import { config } from './config';
 import { getCurrentUser } from './auth';
 
@@ -464,4 +464,56 @@ export async function votePermanentDeleteOnServer(
     console.warn('[RoomStorage] Failed to cast delete vote on server (offline):', err);
   }
   return null;
+}
+
+/**
+ * Fetches all permanent file edit logs stored in SQLite database on the server
+ */
+export async function fetchFileEditsFromServer(
+  roomCode: string,
+  fileId: string
+): Promise<FileEditLogEntry[]> {
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    const res = await fetch(
+      `${config.serverHttpUrl}/api/rooms/${cleanCode}/files/${encodeURIComponent(fileId)}/edits`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.edits)) {
+        return data.edits;
+      }
+    }
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to fetch file edits from server:', err);
+  }
+  return [];
+}
+
+/**
+ * Persists file edit logs permanently into the SQLite database on the server
+ */
+export async function syncFileEditsToServer(
+  roomCode: string,
+  fileId: string,
+  edits: FileEditLogEntry[]
+): Promise<boolean> {
+  if (!edits || edits.length === 0) return true;
+  const cleanCode = roomCode.trim().toUpperCase();
+  try {
+    const res = await fetch(
+      `${config.serverHttpUrl}/api/rooms/${cleanCode}/files/${encodeURIComponent(fileId)}/edits`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ edits }),
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('[RoomStorage] Failed to sync file edits to server (offline):', err);
+    return false;
+  }
 }

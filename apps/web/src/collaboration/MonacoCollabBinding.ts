@@ -102,7 +102,6 @@ export class MonacoCollabBinding {
   private _savedSelections: Map<monaco.editor.IStandaloneCodeEditor, RelativeSelection>;
   private _beforeTransaction: () => void;
   private _decorations: Map<monaco.editor.IStandaloneCodeEditor, string[]>;
-  private _allowLiveHighlights: boolean = false;
   private _editDecorations: Map<
     monaco.editor.IStandaloneCodeEditor,
     Map<string, ActiveEditHighlight>
@@ -180,10 +179,9 @@ export class MonacoCollabBinding {
           origin === 'deduplicate-exact-halves' ||
           origin === 'deduplicate-exact-chunks';
 
-        // Identify which remote peer made this edit (only if live highlights are enabled and not an initial file dump)
+        // Identify which remote peer made this edit
         let remoteClientId: number | null = null;
         if (
-          this._allowLiveHighlights &&
           !isInitialTransaction &&
           event.transaction &&
           event.transaction.origin !== this
@@ -214,7 +212,6 @@ export class MonacoCollabBinding {
             this.monacoModel.applyEdits([{ range, text: insert }]);
 
             if (
-              this._allowLiveHighlights &&
               !isInitialTransaction &&
               remoteClientId !== null &&
               insert.length > 0 &&
@@ -253,7 +250,7 @@ export class MonacoCollabBinding {
         });
 
         // Add translucent character-level edit highlight strictly for live snippet insertions
-        if (this._allowLiveHighlights && !isInitialTransaction && insertedSnippets.length > 0) {
+        if (!isInitialTransaction && insertedSnippets.length > 0) {
           this._addEditHighlights(insertedSnippets);
 
           // Guarantee persistent logging of remote edits into CRDT edit log
@@ -268,6 +265,9 @@ export class MonacoCollabBinding {
             const remoteUserColor =
               clientMeta?.color || awarenessState?.user?.color || '#3B82F6';
 
+            ensureUserEditStyle(remoteUserId, remoteUserColor, remoteUserName);
+            ensureUserEditStyle(snippet.clientId, remoteUserColor, remoteUserName);
+
             const startOffset = this.monacoModel.getOffsetAt(snippet.range.getStartPosition());
             const endOffset = this.monacoModel.getOffsetAt(snippet.range.getEndPosition());
             const startRelPos = Y.createRelativePositionFromTypeIndex(
@@ -278,7 +278,7 @@ export class MonacoCollabBinding {
             const endRelPos = Y.createRelativePositionFromTypeIndex(
               this.ytext,
               endOffset,
-              0
+              -1
             );
 
             const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
@@ -347,108 +347,107 @@ export class MonacoCollabBinding {
           });
 
           // Log local edits permanently into file-edits-log CRDT Map
-          if (this._allowLiveHighlights) {
-            const userId = this.currentUser?.id || `client_${this.doc.clientID}`;
-            const userName = this.currentUser?.name || 'You';
-            const userColor = this.currentUser?.color || '#6366F1';
-            const now = Date.now();
+          const userId = this.currentUser?.id || `client_${this.doc.clientID}`;
+          const userName = this.currentUser?.name || 'You';
+          const userColor = this.currentUser?.color || '#6366F1';
+          const now = Date.now();
 
-            event.changes.forEach((change) => {
-              if (change.text.length > 0) {
-                const startOffset = change.rangeOffset;
-                const endOffset = change.rangeOffset + change.text.length;
-                const startRelPos = Y.createRelativePositionFromTypeIndex(
-                  this.ytext,
-                  startOffset,
-                  -1
-                );
-                const endRelPos = Y.createRelativePositionFromTypeIndex(
-                  this.ytext,
-                  endOffset,
-                  0
-                );
+          ensureUserEditStyle(userId, userColor, userName);
+          ensureUserEditStyle(this.doc.clientID, userColor, userName);
 
-                // Smart merge: check if there is a recent adjacent edit by this user
-                let merged = false;
-                const existingEntries = Array.from(
-                  this.editsMap.values()
-                ) as FileEditLogEntry[];
-
-                for (const existing of existingEntries) {
-                  if (existing.userId === userId && now - existing.timestamp < 20000) {
-                    const absEnd = Y.createAbsolutePositionFromRelativePosition(
-                      existing.endRelPos,
-                      this.doc
-                    );
-                    if (
-                      absEnd &&
-                      absEnd.type === this.ytext &&
-                      Math.abs(absEnd.index - startOffset) <= 1
-                    ) {
-                      this.editsMap.set(existing.id, {
-                        ...existing,
-                        endRelPos,
-                        text: ((existing.text || '') + change.text).slice(0, 100),
-                        timestamp: now,
-                      });
-                      merged = true;
-                      break;
-                    }
-                  }
-                }
-
-                if (!merged) {
-                  const editId = `edit_${now}_${Math.random().toString(36).slice(2, 8)}`;
-                  const startPos = this.monacoModel.getPositionAt(startOffset);
-                  this.editsMap.set(editId, {
-                    id: editId,
-                    fileId: this.fileId,
-                    userId,
-                    userName,
-                    userColor,
-                    startRelPos,
-                    endRelPos,
-                    text:
-                      change.text.length > 60
-                        ? change.text.slice(0, 60) + '...'
-                        : change.text,
-                    timestamp: now,
-                    linePreview: startPos.lineNumber,
-                  });
-                }
-              }
-            });
-          }
-        }, this);
-
-        // Highlight local user's edits permanently in their unique color
-        if (this._allowLiveHighlights) {
-          const localSnippets: { range: monaco.Range; clientId: number }[] = [];
           event.changes.forEach((change) => {
             if (change.text.length > 0) {
-              const startPos = this.monacoModel.getPositionAt(change.rangeOffset);
-              const endPos = this.monacoModel.getPositionAt(
-                change.rangeOffset + change.text.length
+              const startOffset = change.rangeOffset;
+              const endOffset = change.rangeOffset + change.text.length;
+              const startRelPos = Y.createRelativePositionFromTypeIndex(
+                this.ytext,
+                startOffset,
+                -1
               );
-              if (
-                startPos.lineNumber !== endPos.lineNumber ||
-                startPos.column !== endPos.column
-              ) {
-                localSnippets.push({
-                  range: new monaco.Range(
-                    startPos.lineNumber,
-                    startPos.column,
-                    endPos.lineNumber,
-                    endPos.column
-                  ),
-                  clientId: this.doc.clientID,
+              const endRelPos = Y.createRelativePositionFromTypeIndex(
+                this.ytext,
+                endOffset,
+                -1
+              );
+
+              // Smart merge: check if there is a recent adjacent edit by this user
+              let merged = false;
+              const existingEntries = Array.from(
+                this.editsMap.values()
+              ) as FileEditLogEntry[];
+
+              for (const existing of existingEntries) {
+                if (existing.userId === userId && now - existing.timestamp < 20000) {
+                  const absEnd = Y.createAbsolutePositionFromRelativePosition(
+                    existing.endRelPos,
+                    this.doc
+                  );
+                  if (
+                    absEnd &&
+                    (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item) &&
+                    Math.abs(absEnd.index - startOffset) <= 1
+                  ) {
+                    this.editsMap.set(existing.id, {
+                      ...existing,
+                      endRelPos,
+                      text: ((existing.text || '') + change.text).slice(0, 100),
+                      timestamp: now,
+                    });
+                    merged = true;
+                    break;
+                  }
+                }
+              }
+
+              if (!merged) {
+                const editId = `edit_${now}_${Math.random().toString(36).slice(2, 8)}`;
+                const startPos = this.monacoModel.getPositionAt(startOffset);
+                this.editsMap.set(editId, {
+                  id: editId,
+                  fileId: this.fileId,
+                  userId,
+                  userName,
+                  userColor,
+                  startRelPos,
+                  endRelPos,
+                  text:
+                    change.text.length > 60
+                      ? change.text.slice(0, 60) + '...'
+                      : change.text,
+                  timestamp: now,
+                  linePreview: startPos.lineNumber,
                 });
               }
             }
           });
-          if (localSnippets.length > 0) {
-            this._addEditHighlights(localSnippets);
+        }, this);
+
+        // Highlight local user's edits permanently in their unique color
+        const localSnippets: { range: monaco.Range; clientId: number }[] = [];
+        event.changes.forEach((change) => {
+          if (change.text.length > 0) {
+            const startPos = this.monacoModel.getPositionAt(change.rangeOffset);
+            const endPos = this.monacoModel.getPositionAt(
+              change.rangeOffset + change.text.length
+            );
+            if (
+              startPos.lineNumber !== endPos.lineNumber ||
+              startPos.column !== endPos.column
+            ) {
+              localSnippets.push({
+                range: new monaco.Range(
+                  startPos.lineNumber,
+                  startPos.column,
+                  endPos.lineNumber,
+                  endPos.column
+                ),
+                clientId: this.doc.clientID,
+              });
+            }
           }
+        });
+        if (localSnippets.length > 0) {
+          this._addEditHighlights(localSnippets);
         }
       });
       this.renderLogHighlights();
@@ -653,13 +652,15 @@ export class MonacoCollabBinding {
             this.doc
           );
 
-          if (
+          const isDocType =
             startAbs !== null &&
             endAbs !== null &&
-            startAbs.type === this.ytext &&
-            endAbs.type === this.ytext &&
-            startAbs.index < endAbs.index
-          ) {
+            (startAbs.type === this.ytext ||
+              (startAbs.type as any)?._item === (this.ytext as any)?._item) &&
+            (endAbs.type === this.ytext ||
+              (endAbs.type as any)?._item === (this.ytext as any)?._item);
+
+          if (isDocType && startAbs.index < endAbs.index) {
             const startPos = this.monacoModel.getPositionAt(startAbs.index);
             const endPos = this.monacoModel.getPositionAt(endAbs.index);
 
@@ -673,6 +674,8 @@ export class MonacoCollabBinding {
                 '_'
               );
               ensureUserEditStyle(safeKey, entry.userColor, entry.userName);
+              if (entry.userId) ensureUserEditStyle(entry.userId, entry.userColor, entry.userName);
+              if (entry.userName) ensureUserEditStyle(entry.userName, entry.userColor, entry.userName);
 
               const hoverText = isMe
                 ? `✍️ **You (${entry.userName})** edited this snippet`
@@ -1044,7 +1047,6 @@ export class MonacoCollabBinding {
    * do not show any highlights for existing code.
    */
   public enableLiveHighlights(): void {
-    this._allowLiveHighlights = true;
     this.renderLogHighlights();
   }
 

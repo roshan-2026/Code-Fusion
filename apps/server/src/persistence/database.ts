@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import type { Room, ProjectFile, RoomMember } from '@hostelcode/shared';
+import type { Room, ProjectFile, RoomMember, FileEditLogEntry } from '@hostelcode/shared';
 import { getCollaboratorColor } from '@hostelcode/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -83,6 +83,23 @@ db.exec(`
     doc_name TEXT PRIMARY KEY,
     update_blob BLOB NOT NULL,
     updated_at TEXT NOT NULL
+  );
+
+  -- File edit history logs (Permanent highlights across all users & sessions)
+  CREATE TABLE IF NOT EXISTS file_edit_logs (
+    id TEXT PRIMARY KEY,
+    room_code TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    user_color TEXT NOT NULL,
+    start_rel_pos TEXT NOT NULL,
+    end_rel_pos TEXT NOT NULL,
+    text TEXT,
+    timestamp INTEGER NOT NULL,
+    line_preview INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (room_code) REFERENCES rooms(code) ON DELETE CASCADE
   );
 `);
 
@@ -571,4 +588,95 @@ export function getYDocUpdate(docName: string): Uint8Array | null {
   const row = stmt.get(docName) as any;
   if (!row || !row.update_blob) return null;
   return new Uint8Array(row.update_blob);
+}
+
+/**
+ * Saves or updates file edit logs permanently in SQLite database
+ */
+export function saveFileEditLogs(
+  roomCode: string,
+  fileId: string,
+  edits: FileEditLogEntry[]
+): void {
+  if (!edits || edits.length === 0) return;
+  const cleanCode = roomCode.trim().toUpperCase();
+
+  const stmt = db.prepare(`
+    INSERT INTO file_edit_logs (
+      id, room_code, file_id, user_id, user_name, user_color,
+      start_rel_pos, end_rel_pos, text, timestamp, line_preview, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      user_name = excluded.user_name,
+      user_color = excluded.user_color,
+      start_rel_pos = excluded.start_rel_pos,
+      end_rel_pos = excluded.end_rel_pos,
+      text = excluded.text,
+      timestamp = excluded.timestamp,
+      line_preview = excluded.line_preview
+  `);
+
+  for (const edit of edits) {
+    if (!edit || !edit.id) continue;
+    try {
+      stmt.run(
+        edit.id,
+        cleanCode,
+        fileId,
+        edit.userId || 'unknown',
+        edit.userName || 'Peer',
+        edit.userColor || '#6366F1',
+        typeof edit.startRelPos === 'string'
+          ? edit.startRelPos
+          : JSON.stringify(edit.startRelPos),
+        typeof edit.endRelPos === 'string'
+          ? edit.endRelPos
+          : JSON.stringify(edit.endRelPos),
+        edit.text || '',
+        edit.timestamp || Date.now(),
+        edit.linePreview || 1,
+        new Date().toISOString()
+      );
+    } catch (err) {
+      console.warn('[Database] Error saving file edit log entry:', err);
+    }
+  }
+}
+
+/**
+ * Loads all file edit logs permanently stored in SQLite database
+ */
+export function getFileEditLogs(
+  roomCode: string,
+  fileId: string
+): FileEditLogEntry[] {
+  const cleanCode = roomCode.trim().toUpperCase();
+  const stmt = db.prepare(`
+    SELECT id, file_id, user_id, user_name, user_color,
+           start_rel_pos, end_rel_pos, text, timestamp, line_preview
+    FROM file_edit_logs
+    WHERE room_code = ? AND file_id = ?
+    ORDER BY timestamp ASC
+  `);
+
+  const rows = stmt.all(cleanCode, fileId) as any[];
+  return rows.map((row) => ({
+    id: row.id,
+    fileId: row.file_id,
+    userId: row.user_id,
+    userName: row.user_name,
+    userColor: row.user_color,
+    startRelPos:
+      typeof row.start_rel_pos === 'string'
+        ? JSON.parse(row.start_rel_pos)
+        : row.start_rel_pos,
+    endRelPos:
+      typeof row.end_rel_pos === 'string'
+        ? JSON.parse(row.end_rel_pos)
+        : row.end_rel_pos,
+    text: row.text || '',
+    timestamp: row.timestamp,
+    linePreview: row.line_preview,
+  }));
 }

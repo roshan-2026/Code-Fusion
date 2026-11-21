@@ -8,7 +8,7 @@ import { buildDocumentName, getCollaboratorColor } from '@hostelcode/shared';
 import type { ConnectionStatus, AuthUser, RoomMember, SupportedLanguage, FileEditLogEntry } from '@hostelcode/shared';
 import type { WorkspaceFile } from '../types/workspace';
 import { config } from '../lib/config';
-import { updateCursorStyles } from './cursorStyles';
+import { updateCursorStyles, ensureUserEditStyle } from './cursorStyles';
 import {
   updateRoomFilesLocally,
   recycleFileOnServer,
@@ -16,6 +16,8 @@ import {
   votePermanentDeleteOnServer,
   purgeRoomLocally,
   verifyRoomActiveOnServer,
+  fetchFileEditsFromServer,
+  syncFileEditsToServer,
 } from '../lib/roomStorage';
 
 export interface UseRoomCollabOptions {
@@ -383,6 +385,8 @@ export function useRoomCollab({
 
       const updatedMembers: RoomMember[] = [];
       knownMembersRef.current.forEach((mem) => {
+        ensureUserEditStyle(mem.id, mem.color, mem.name);
+        ensureUserEditStyle(mem.name, mem.color, mem.name);
         updatedMembers.push({
           ...mem,
           isOnline: onlineUsers.has(mem.id),
@@ -654,16 +658,40 @@ export function useRoomCollab({
     };
     registerClientMeta();
 
-    // Active file edits tracking for Edit History panel
+    // Active file edits tracking for Edit History panel & server SQLite sync
     const editsMap = fileDoc.getMap<FileEditLogEntry>('file-edits-log');
+    let syncToServerTimer: ReturnType<typeof setTimeout> | null = null;
+
     const updateActiveEdits = () => {
       const list = (Array.from(editsMap.values()) as FileEditLogEntry[])
         .filter((e) => Boolean(e && e.id))
         .sort((a, b) => b.timestamp - a.timestamp);
       setActiveFileEdits(list);
+
+      // Debounce persistent sync to SQLite database on server
+      if (syncToServerTimer) clearTimeout(syncToServerTimer);
+      syncToServerTimer = setTimeout(() => {
+        if (list.length > 0) {
+          syncFileEditsToServer(roomCode, activeFileId, list);
+        }
+      }, 2000);
     };
     updateActiveEdits();
     editsMap.observe(updateActiveEdits);
+
+    // Initial fetch from server SQLite database to ensure no edits are missed
+    fetchFileEditsFromServer(roomCode, activeFileId).then((dbEdits) => {
+      if (dbEdits && dbEdits.length > 0 && fileDocRef.current) {
+        fileDoc.transact(() => {
+          dbEdits.forEach((entry) => {
+            if (!editsMap.has(entry.id)) {
+              editsMap.set(entry.id, entry);
+            }
+          });
+        }, 'db-edits-sync');
+        updateActiveEdits();
+      }
+    });
 
     // Offline IndexedDB persistence for active file
     const fileIndexeddb = new IndexeddbPersistence(fileDocName, fileDoc);
@@ -935,6 +963,7 @@ export function useRoomCollab({
     }
 
     return () => {
+      if (syncToServerTimer) clearTimeout(syncToServerTimer);
       try {
         editsMap.unobserve(updateActiveEdits);
       } catch {}
