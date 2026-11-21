@@ -92,7 +92,7 @@ export const App: React.FC = () => {
     return (
       <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#121212] text-neutral-300 gap-3">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
-        <span className="font-mono text-sm">Loading HostelCode Workspace...</span>
+        <span className="font-mono text-sm">Loading CollabCode Workspace...</span>
       </div>
     );
   }

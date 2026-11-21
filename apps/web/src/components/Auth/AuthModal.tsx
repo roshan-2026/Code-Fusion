@@ -53,7 +53,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         <div className="mb-6">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-indigo-400" />
-            <span>{isRegister ? 'Register Your Account' : 'Sign In to HostelCode'}</span>
+            <span>{isRegister ? 'Register Your Account' : 'Sign In to CollabCode'}</span>
           </h2>
           <p className="text-xs text-neutral-400 mt-1">
             {isRegister

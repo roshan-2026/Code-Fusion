@@ -58,7 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
             <Code2 className="w-4 h-4 text-indigo-400" />
           </div>
           <span className="text-white hidden md:inline">
-            Hostel<span className="text-indigo-400">Code</span>
+            Collab<span className="text-indigo-400">Code</span>
           </span>
         </div>
 

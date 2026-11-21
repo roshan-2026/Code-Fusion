@@ -6,10 +6,8 @@ import {
   LogOut,
   FolderCode,
   Wifi,
-  Sparkles,
   ArrowRight,
   RefreshCw,
-  Clock,
   HardDrive,
   Copy,
   Check,
@@ -22,7 +20,6 @@ import { generateRoomCode, validateRoomCode } from '@hostelcode/shared';
 import {
   saveRoomLocally,
   syncRoomToServer,
-  getRecentRooms,
   checkRoomExists,
   fetchUserCreatedRooms,
   deleteRoomOnServer,
@@ -59,8 +56,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isCheckingRoom, setIsCheckingRoom] = useState(false);
 
-  // Recent rooms from local storage
-  const [recentRooms, setRecentRooms] = useState<Room[]>(() => getRecentRooms());
+  // Created rooms by current user
   const [createdRooms, setCreatedRooms] = useState<Room[]>([]);
   const [loadingCreatedRooms, setLoadingCreatedRooms] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -125,7 +121,6 @@ export const HomePage: React.FC<HomePageProps> = ({
 
     // Save locally to browser immediately
     saveRoomLocally(newRoom);
-    setRecentRooms(getRecentRooms());
     setCreatedRooms((prev) => [newRoom, ...prev.filter((r) => r.code !== newRoom.code)]);
 
     setIsCreatingRoom(true);
@@ -192,7 +187,6 @@ export const HomePage: React.FC<HomePageProps> = ({
     try {
       await deleteRoomOnServer(code, currentUser);
       setCreatedRooms((prev) => prev.filter((r) => r.code !== code));
-      setRecentRooms((prev) => prev.filter((r) => r.code !== code));
     } catch (err) {
       console.error('Failed to delete room:', err);
     }
@@ -208,10 +202,7 @@ export const HomePage: React.FC<HomePageProps> = ({
           </div>
           <div>
             <span className="font-bold text-lg text-white tracking-wide">
-              Hostel<span className="text-indigo-400">Code</span>
-            </span>
-            <span className="ml-2 text-[10px] uppercase font-mono px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
-              Offline-First
+              Collab<span className="text-indigo-400">Code</span>
             </span>
           </div>
         </div>
@@ -272,15 +263,10 @@ export const HomePage: React.FC<HomePageProps> = ({
           </div>
         )}
 
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-mono mb-6">
-          <Sparkles className="w-3.5 h-3.5" />
-          <span>Deterministic Yjs CRDT · LocalStorage Cache · Zero Conflict</span>
-        </div>
-
         <h1 className="text-4xl sm:text-5xl font-extrabold text-white tracking-tight leading-tight max-w-3xl">
-          Code live with your team over{' '}
+          Code live with your team in{' '}
           <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400">
-            patchy hostel Wi-Fi
+            real-time sync
           </span>
         </h1>
 
@@ -419,57 +405,6 @@ export const HomePage: React.FC<HomePageProps> = ({
             </p>
           </div>
         </div>
-
-        {/* Recent Cached Rooms Section */}
-        {recentRooms.length > 0 && (
-          <div className="mt-16 w-full text-left space-y-4">
-            <div className="flex items-center justify-between border-b border-[#2d2d2d] pb-2">
-              <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-400 flex items-center gap-2 font-mono">
-                <Clock className="w-4 h-4 text-indigo-400" />
-                <span>Your Cached Team Rooms (Instant Open)</span>
-              </h2>
-              <span className="text-[11px] text-neutral-500">Saved in browser storage</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {recentRooms.map((room) => (
-                <div
-                  key={room.code}
-                  onClick={() => onEnterRoom(room.code)}
-                  className="group p-4 rounded-xl bg-[#1e1e1e] border border-[#333333] hover:border-indigo-500/60 cursor-pointer transition-all hover:bg-[#242426]"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-mono text-xs font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-                      {room.code}
-                    </span>
-                    <button
-                      onClick={(e) => handleCopyCode(room.code, e)}
-                      title="Copy 6-Digit Code"
-                      className="text-neutral-500 hover:text-white p-1 rounded"
-                    >
-                      {copiedCode === room.code ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  </div>
-                  <h4 className="font-semibold text-white text-sm truncate">{room.name}</h4>
-                  <p className="text-[11px] text-neutral-400 mt-1 flex items-center gap-1.5">
-                    <FolderCode className="w-3.5 h-3.5" />
-                    <span>{room.files?.length || 0} files</span>
-                    <span>·</span>
-                    <span>Created by {room.creatorName}</span>
-                  </p>
-                  <div className="mt-3 flex items-center gap-1 text-[11px] text-indigo-400 font-medium group-hover:translate-x-1 transition-transform">
-                    <span>Open workspace</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </main>
 
       {/* CREATE TEAM MODAL */}
@@ -489,7 +424,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                   required
                   value={newRoomName}
                   onChange={(e) => setNewRoomName(e.target.value)}
-                  placeholder="e.g. Hostel Hackathon 2026"
+                  placeholder="e.g. Hackathon Project"
                   className="w-full mt-1 px-3 py-2 bg-[#252526] border border-[#3c3c3c] rounded-lg text-sm text-white outline-none focus:border-indigo-500"
                 />
               </div>

@@ -68,7 +68,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
         <div className="hidden lg:flex items-center gap-1 text-[10px] bg-black/20 px-1.5 py-0.5 rounded">
           <Terminal className="w-3 h-3" />
-          <span>HostelCode MVP</span>
+          <span>CollabCode</span>
         </div>
       </div>
     </footer>
