@@ -122,6 +122,16 @@ export class MonacoCollabBinding {
   private _monacoChangeHandler: monaco.IDisposable;
   private _monacoDisposeHandler: monaco.IDisposable;
   private _cursorListeners: monaco.IDisposable[] = [];
+  private _localTypingTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pendingLocalRanges: Array<{
+    startRel: Y.RelativePosition;
+    endRel: Y.RelativePosition;
+  }> = [];
+  private _remoteTypingTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+  private _pendingRemoteRanges: Map<
+    number,
+    Array<{ startRel: Y.RelativePosition; endRel: Y.RelativePosition }>
+  > = new Map();
 
   constructor(
     ytext: Y.Text,
@@ -233,6 +243,34 @@ export class MonacoCollabBinding {
                   clientId: remoteClientId,
                 });
               }
+
+              // Buffer remote edit range for 5-second inactivity line-wise commit
+              const startRel = Y.createRelativePositionFromTypeIndex(
+                this.ytext,
+                index,
+                -1
+              );
+              const endRel = Y.createRelativePositionFromTypeIndex(
+                this.ytext,
+                index + insert.length,
+                -1
+              );
+              let list = this._pendingRemoteRanges.get(remoteClientId);
+              if (!list) {
+                list = [];
+                this._pendingRemoteRanges.set(remoteClientId, list);
+              }
+              list.push({ startRel, endRel });
+
+              // Reset remote 5-second inactivity timer
+              const prevTimer = this._remoteTypingTimers.get(remoteClientId);
+              if (prevTimer) clearTimeout(prevTimer);
+              this._remoteTypingTimers.set(
+                remoteClientId,
+                setTimeout(() => {
+                  this._commitRemoteLineEdits(remoteClientId!);
+                }, 5000)
+              );
             }
 
             index += insert.length;
@@ -248,63 +286,6 @@ export class MonacoCollabBinding {
             this.monacoModel.applyEdits([{ range, text: '' }]);
           }
         });
-
-        // Add translucent character-level edit highlight strictly for live snippet insertions
-        if (!isInitialTransaction && insertedSnippets.length > 0) {
-          this._addEditHighlights(insertedSnippets);
-
-          // Guarantee persistent logging of remote edits into CRDT edit log
-          insertedSnippets.forEach((snippet) => {
-            const awarenessState = this.awareness?.getStates().get(snippet.clientId);
-            const metaMap = this.doc.getMap<any>('_clientMeta');
-            const clientMeta = metaMap.get(String(snippet.clientId));
-            const remoteUserId =
-              clientMeta?.id || awarenessState?.user?.id || `client_${snippet.clientId}`;
-            const remoteUserName =
-              clientMeta?.name || awarenessState?.user?.name || 'Peer';
-            const remoteUserColor =
-              clientMeta?.color || awarenessState?.user?.color || '#3B82F6';
-
-            ensureUserEditStyle(remoteUserId, remoteUserColor, remoteUserName);
-            ensureUserEditStyle(snippet.clientId, remoteUserColor, remoteUserName);
-
-            const startOffset = this.monacoModel.getOffsetAt(snippet.range.getStartPosition());
-            const endOffset = this.monacoModel.getOffsetAt(snippet.range.getEndPosition());
-            const startRelPos = Y.createRelativePositionFromTypeIndex(
-              this.ytext,
-              startOffset,
-              -1
-            );
-            const endRelPos = Y.createRelativePositionFromTypeIndex(
-              this.ytext,
-              endOffset,
-              -1
-            );
-
-            const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
-            const alreadyExists = existingEntries.some((e) => {
-              if (e.userId !== remoteUserId) return false;
-              const absStart = Y.createAbsolutePositionFromRelativePosition(e.startRelPos, this.doc);
-              return absStart && Math.abs(absStart.index - startOffset) <= 2;
-            });
-
-            if (!alreadyExists) {
-              const editId = `edit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-              this.editsMap.set(editId, {
-                id: editId,
-                fileId: this.fileId,
-                userId: remoteUserId,
-                userName: remoteUserName,
-                userColor: remoteUserColor,
-                startRelPos,
-                endRelPos,
-                text: this.monacoModel.getValueInRange(snippet.range),
-                timestamp: Date.now(),
-                linePreview: snippet.range.startLineNumber,
-              });
-            }
-          });
-        }
 
         // Restore local selections: thanks to assoc = -1, caret cursors at insertion points
         // stay before the newly inserted characters and are NOT dragged to new lines or along with remote edits!
@@ -324,7 +305,6 @@ export class MonacoCollabBinding {
         });
       });
       this._rerenderDecorations();
-      this.renderLogHighlights();
     };
     this.ytext.observe(this._ytextObserver);
 
@@ -345,112 +325,35 @@ export class MonacoCollabBinding {
             this.ytext.delete(change.rangeOffset, change.rangeLength);
             this.ytext.insert(change.rangeOffset, change.text);
           });
-
-          // Log local edits permanently into file-edits-log CRDT Map
-          const userId = this.currentUser?.id || `client_${this.doc.clientID}`;
-          const userName = this.currentUser?.name || 'You';
-          const userColor = this.currentUser?.color || '#6366F1';
-          const now = Date.now();
-
-          ensureUserEditStyle(userId, userColor, userName);
-          ensureUserEditStyle(this.doc.clientID, userColor, userName);
-
-          event.changes.forEach((change) => {
-            if (change.text.length > 0) {
-              const startOffset = change.rangeOffset;
-              const endOffset = change.rangeOffset + change.text.length;
-              const startRelPos = Y.createRelativePositionFromTypeIndex(
-                this.ytext,
-                startOffset,
-                -1
-              );
-              const endRelPos = Y.createRelativePositionFromTypeIndex(
-                this.ytext,
-                endOffset,
-                -1
-              );
-
-              // Smart merge: check if there is a recent adjacent edit by this user
-              let merged = false;
-              const existingEntries = Array.from(
-                this.editsMap.values()
-              ) as FileEditLogEntry[];
-
-              for (const existing of existingEntries) {
-                if (existing.userId === userId && now - existing.timestamp < 20000) {
-                  const absEnd = Y.createAbsolutePositionFromRelativePosition(
-                    existing.endRelPos,
-                    this.doc
-                  );
-                  if (
-                    absEnd &&
-                    (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item) &&
-                    Math.abs(absEnd.index - startOffset) <= 1
-                  ) {
-                    this.editsMap.set(existing.id, {
-                      ...existing,
-                      endRelPos,
-                      text: ((existing.text || '') + change.text).slice(0, 100),
-                      timestamp: now,
-                    });
-                    merged = true;
-                    break;
-                  }
-                }
-              }
-
-              if (!merged) {
-                const editId = `edit_${now}_${Math.random().toString(36).slice(2, 8)}`;
-                const startPos = this.monacoModel.getPositionAt(startOffset);
-                this.editsMap.set(editId, {
-                  id: editId,
-                  fileId: this.fileId,
-                  userId,
-                  userName,
-                  userColor,
-                  startRelPos,
-                  endRelPos,
-                  text:
-                    change.text.length > 60
-                      ? change.text.slice(0, 60) + '...'
-                      : change.text,
-                  timestamp: now,
-                  linePreview: startPos.lineNumber,
-                });
-              }
-            }
-          });
         }, this);
 
-        // Highlight local user's edits permanently in their unique color
-        const localSnippets: { range: monaco.Range; clientId: number }[] = [];
+        // Do NOT update edit log per click/keystroke!
+        // Buffer the edit ranges using relative positions so they track accurately across any subsequent edits
         event.changes.forEach((change) => {
-          if (change.text.length > 0) {
-            const startPos = this.monacoModel.getPositionAt(change.rangeOffset);
-            const endPos = this.monacoModel.getPositionAt(
-              change.rangeOffset + change.text.length
-            );
-            if (
-              startPos.lineNumber !== endPos.lineNumber ||
-              startPos.column !== endPos.column
-            ) {
-              localSnippets.push({
-                range: new monaco.Range(
-                  startPos.lineNumber,
-                  startPos.column,
-                  endPos.lineNumber,
-                  endPos.column
-                ),
-                clientId: this.doc.clientID,
-              });
-            }
-          }
+          const startOffset = change.rangeOffset;
+          const endOffset = change.rangeOffset + change.text.length;
+          const startRel = Y.createRelativePositionFromTypeIndex(
+            this.ytext,
+            startOffset,
+            -1
+          );
+          const endRel = Y.createRelativePositionFromTypeIndex(
+            this.ytext,
+            Math.max(startOffset, endOffset),
+            -1
+          );
+          this._pendingLocalRanges.push({ startRel, endRel });
         });
-        if (localSnippets.length > 0) {
-          this._addEditHighlights(localSnippets);
+
+        // Reset 5-second inactivity debounce timer
+        // Wait for the user to complete typing; if user does not type for 5s, commit edits line-wise
+        if (this._localTypingTimer) {
+          clearTimeout(this._localTypingTimer);
         }
+        this._localTypingTimer = setTimeout(() => {
+          this._commitLocalLineEdits();
+        }, 5000);
       });
-      this.renderLogHighlights();
     });
 
     this._monacoDisposeHandler = this.monacoModel.onWillDispose(() => {
@@ -610,7 +513,265 @@ export class MonacoCollabBinding {
   }
 
   /**
-   * Permanently renders character-level highlights from the CRDT edit log.
+   * Commits pending local edits line-wise to the CRDT editsMap after 5 seconds of typing inactivity.
+   */
+  private _commitLocalLineEdits(): void {
+    if (this._isDestroyed) return;
+    if (this._localTypingTimer) {
+      clearTimeout(this._localTypingTimer);
+      this._localTypingTimer = null;
+    }
+
+    if (this._pendingLocalRanges.length === 0) return;
+
+    const ranges = [...this._pendingLocalRanges];
+    this._pendingLocalRanges = [];
+
+    const affectedLines = new Set<number>();
+    const totalLines = this.monacoModel.getLineCount();
+
+    ranges.forEach((r) => {
+      try {
+        const absStart = Y.createAbsolutePositionFromRelativePosition(r.startRel, this.doc);
+        const absEnd = Y.createAbsolutePositionFromRelativePosition(r.endRel, this.doc);
+        if (
+          absStart &&
+          (absStart.type === this.ytext || (absStart.type as any)?._item === (this.ytext as any)?._item)
+        ) {
+          const startLine = this.monacoModel.getPositionAt(absStart.index).lineNumber;
+          const endLine =
+            absEnd &&
+            (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item)
+              ? this.monacoModel.getPositionAt(absEnd.index).lineNumber
+              : startLine;
+
+          const minL = Math.max(1, Math.min(startLine, endLine));
+          const maxL = Math.min(totalLines, Math.max(startLine, endLine));
+          for (let l = minL; l <= maxL; l++) {
+            affectedLines.add(l);
+          }
+        }
+      } catch {}
+    });
+
+    if (affectedLines.size === 0) return;
+
+    const userId = this.currentUser?.id || `client_${this.doc.clientID}`;
+    const userName = this.currentUser?.name || 'You';
+    const userColor = this.currentUser?.color || '#6366F1';
+    const now = Date.now();
+
+    ensureUserEditStyle(userId, userColor, userName);
+    ensureUserEditStyle(this.doc.clientID, userColor, userName);
+
+    const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
+
+    this.doc.transact(() => {
+      affectedLines.forEach((lineNum) => {
+        if (lineNum < 1 || lineNum > this.monacoModel.getLineCount()) return;
+
+        const lineContent = this.monacoModel.getLineContent(lineNum);
+        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
+
+        const lineStartOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: 1 });
+        let lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
+
+        if (lineEndOffset === lineStartOffset && lineNum < totalLines) {
+          lineEndOffset = lineStartOffset + 1;
+        }
+
+        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, lineStartOffset, -1);
+        const endRelPos = Y.createRelativePositionFromTypeIndex(
+          this.ytext,
+          Math.max(lineStartOffset, lineEndOffset),
+          -1
+        );
+
+        const trimmed = lineContent.trim();
+        const previewText =
+          trimmed.length > 70 ? trimmed.slice(0, 70) + '...' : trimmed || '(empty line)';
+
+        // Find existing entry on this line if already recorded
+        let targetId: string | null = null;
+        for (const entry of existingEntries) {
+          if (entry.fileId !== this.fileId) continue;
+          const abs = Y.createAbsolutePositionFromRelativePosition(entry.startRelPos, this.doc);
+          if (
+            abs &&
+            (abs.type === this.ytext || (abs.type as any)?._item === (this.ytext as any)?._item)
+          ) {
+            const pos = this.monacoModel.getPositionAt(abs.index);
+            if (pos.lineNumber === lineNum) {
+              targetId = entry.id;
+              break;
+            }
+          }
+        }
+
+        if (!targetId) {
+          targetId = `edit_${now}_l${lineNum}_${Math.random().toString(36).slice(2, 6)}`;
+        }
+
+        this.editsMap.set(targetId, {
+          id: targetId,
+          fileId: this.fileId,
+          userId,
+          userName,
+          userColor,
+          startRelPos,
+          endRelPos,
+          text: previewText,
+          timestamp: now,
+          linePreview: lineNum,
+        });
+      });
+    }, this);
+
+    this.renderLogHighlights();
+  }
+
+  /**
+   * Commits pending remote peer edits line-wise after 5 seconds of remote typing inactivity.
+   */
+  private _commitRemoteLineEdits(remoteClientId: number): void {
+    if (this._isDestroyed) return;
+    const timer = this._remoteTypingTimers.get(remoteClientId);
+    if (timer) {
+      clearTimeout(timer);
+      this._remoteTypingTimers.delete(remoteClientId);
+    }
+
+    const ranges = this._pendingRemoteRanges.get(remoteClientId);
+    if (!ranges || ranges.length === 0) return;
+    this._pendingRemoteRanges.delete(remoteClientId);
+
+    const affectedLines = new Set<number>();
+    const totalLines = this.monacoModel.getLineCount();
+
+    ranges.forEach((r) => {
+      try {
+        const absStart = Y.createAbsolutePositionFromRelativePosition(r.startRel, this.doc);
+        const absEnd = Y.createAbsolutePositionFromRelativePosition(r.endRel, this.doc);
+        if (
+          absStart &&
+          (absStart.type === this.ytext || (absStart.type as any)?._item === (this.ytext as any)?._item)
+        ) {
+          const startLine = this.monacoModel.getPositionAt(absStart.index).lineNumber;
+          const endLine =
+            absEnd &&
+            (absEnd.type === this.ytext || (absEnd.type as any)?._item === (this.ytext as any)?._item)
+              ? this.monacoModel.getPositionAt(absEnd.index).lineNumber
+              : startLine;
+
+          const minL = Math.max(1, Math.min(startLine, endLine));
+          const maxL = Math.min(totalLines, Math.max(startLine, endLine));
+          for (let l = minL; l <= maxL; l++) {
+            affectedLines.add(l);
+          }
+        }
+      } catch {}
+    });
+
+    if (affectedLines.size === 0) return;
+
+    const awarenessState = this.awareness?.getStates().get(remoteClientId);
+    const metaMap = this.doc.getMap<any>('_clientMeta');
+    const clientMeta = metaMap.get(String(remoteClientId));
+    const remoteUserId =
+      clientMeta?.id || awarenessState?.user?.id || `client_${remoteClientId}`;
+    const remoteUserName =
+      clientMeta?.name || awarenessState?.user?.name || 'Peer';
+    const remoteUserColor =
+      clientMeta?.color || awarenessState?.user?.color || '#3B82F6';
+    const now = Date.now();
+
+    ensureUserEditStyle(remoteUserId, remoteUserColor, remoteUserName);
+    ensureUserEditStyle(remoteClientId, remoteUserColor, remoteUserName);
+
+    const existingEntries = Array.from(this.editsMap.values()) as FileEditLogEntry[];
+
+    this.doc.transact(() => {
+      affectedLines.forEach((lineNum) => {
+        if (lineNum < 1 || lineNum > this.monacoModel.getLineCount()) return;
+
+        // If an entry on this line was already logged recently by this user, don't duplicate
+        const alreadyLogged = existingEntries.some((entry) => {
+          if (entry.userId !== remoteUserId || entry.fileId !== this.fileId) return false;
+          const abs = Y.createAbsolutePositionFromRelativePosition(entry.startRelPos, this.doc);
+          if (
+            abs &&
+            (abs.type === this.ytext || (abs.type as any)?._item === (this.ytext as any)?._item)
+          ) {
+            const pos = this.monacoModel.getPositionAt(abs.index);
+            return pos.lineNumber === lineNum && now - entry.timestamp < 10000;
+          }
+          return false;
+        });
+
+        if (alreadyLogged) return;
+
+        const lineContent = this.monacoModel.getLineContent(lineNum);
+        const lineMaxCol = this.monacoModel.getLineMaxColumn(lineNum);
+
+        const lineStartOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: 1 });
+        let lineEndOffset = this.monacoModel.getOffsetAt({ lineNumber: lineNum, column: lineMaxCol });
+
+        if (lineEndOffset === lineStartOffset && lineNum < totalLines) {
+          lineEndOffset = lineStartOffset + 1;
+        }
+
+        const startRelPos = Y.createRelativePositionFromTypeIndex(this.ytext, lineStartOffset, -1);
+        const endRelPos = Y.createRelativePositionFromTypeIndex(
+          this.ytext,
+          Math.max(lineStartOffset, lineEndOffset),
+          -1
+        );
+
+        const trimmed = lineContent.trim();
+        const previewText =
+          trimmed.length > 70 ? trimmed.slice(0, 70) + '...' : trimmed || '(empty line)';
+
+        // Find existing entry on this line if already recorded
+        let targetId: string | null = null;
+        for (const entry of existingEntries) {
+          if (entry.fileId !== this.fileId) continue;
+          const abs = Y.createAbsolutePositionFromRelativePosition(entry.startRelPos, this.doc);
+          if (
+            abs &&
+            (abs.type === this.ytext || (abs.type as any)?._item === (this.ytext as any)?._item)
+          ) {
+            const pos = this.monacoModel.getPositionAt(abs.index);
+            if (pos.lineNumber === lineNum) {
+              targetId = entry.id;
+              break;
+            }
+          }
+        }
+
+        if (!targetId) {
+          targetId = `edit_${now}_l${lineNum}_${Math.random().toString(36).slice(2, 6)}`;
+        }
+
+        this.editsMap.set(targetId, {
+          id: targetId,
+          fileId: this.fileId,
+          userId: remoteUserId,
+          userName: remoteUserName,
+          userColor: remoteUserColor,
+          startRelPos,
+          endRelPos,
+          text: previewText,
+          timestamp: now,
+          linePreview: lineNum,
+        });
+      });
+    }, this);
+
+    this.renderLogHighlights();
+  }
+
+  /**
+   * Permanently renders line-level highlights from the CRDT edit log.
    * This guarantees that when ANY user refreshes the page, rejoins, or joins for
    * the first time, all edits made by any collaborator are restored and displayed
    * in that collaborator's unique color with hover tooltips.
@@ -636,6 +797,15 @@ export class MonacoCollabBinding {
 
     this.editors.forEach((editor) => {
       if (editor.getModel() !== this.monacoModel) return;
+
+      // Clean up any transient edit decorations so permanent log decorations take precedence cleanly
+      const oldSnippets = this._editDecorations.get(editor);
+      if (oldSnippets && oldSnippets.size > 0) {
+        try {
+          editor.deltaDecorations(Array.from(oldSnippets.keys()), []);
+        } catch {}
+        oldSnippets.clear();
+      }
 
       const decorations: monaco.editor.IModelDeltaDecoration[] = [];
 
@@ -678,8 +848,8 @@ export class MonacoCollabBinding {
               if (entry.userName) ensureUserEditStyle(entry.userName, entry.userColor, entry.userName);
 
               const hoverText = isMe
-                ? `✍️ **You (${entry.userName})** edited this snippet`
-                : `✍️ **${entry.userName}** edited this snippet`;
+                ? `✍️ **You (${entry.userName})** edited Line ${startPos.lineNumber}`
+                : `✍️ **${entry.userName}** edited Line ${startPos.lineNumber}`;
 
               decorations.push({
                 range: new monaco.Range(
@@ -715,139 +885,7 @@ export class MonacoCollabBinding {
     });
   }
 
-  /**
-   * Dynamically adds and merges character-level translucent edit highlights
-   * strictly for edited snippets of code (never whole lines), persisting permanently
-   * in the unique color of the user who committed the change.
-   */
-  private _addEditHighlights(
-    snippets: { range: monaco.Range; clientId: number }[]
-  ): void {
-    this.editors.forEach((editor) => {
-      if (editor.getModel() !== this.monacoModel) return;
 
-      let editorHighlights = this._editDecorations.get(editor);
-      if (!editorHighlights) {
-        editorHighlights = new Map<string, ActiveEditHighlight>();
-        this._editDecorations.set(editor, editorHighlights);
-      }
-
-      snippets.forEach((snippet) => {
-        const isMe = snippet.clientId === this.doc.clientID;
-        const awarenessState = this.awareness?.getStates().get(snippet.clientId);
-        const metaMap = this.doc.getMap<any>('_clientMeta');
-        const clientMeta = metaMap.get(String(snippet.clientId));
-        const localUser = this.awareness?.getLocalState()?.user;
-
-        const rawName =
-          (isMe ? localUser?.name : null) ||
-          clientMeta?.name ||
-          awarenessState?.user?.name ||
-          (isMe ? 'You' : 'Peer');
-        const userName = rawName.replace(/"/g, '\\"');
-        const userColor =
-          (isMe ? localUser?.color : null) ||
-          clientMeta?.color ||
-          awarenessState?.user?.color ||
-          '#6366F1';
-
-        // Ensure dynamic CSS rule exists for this user's unique color
-        ensureUserEditStyle(snippet.clientId, userColor, userName);
-
-        // Check if there is an existing highlight for this client that touches or is adjacent
-        let existingToMerge: ActiveEditHighlight | null = null;
-        let mergedRange: monaco.Range = snippet.range;
-
-        for (const [, highlight] of editorHighlights!) {
-          if (highlight.clientId === snippet.clientId) {
-            const currentRange = editor.getModel()?.getDecorationRange(highlight.id);
-            if (currentRange && !currentRange.isEmpty()) {
-              const isAdjacentOrOverlapping =
-                (currentRange.endLineNumber === snippet.range.startLineNumber &&
-                  Math.abs(currentRange.endColumn - snippet.range.startColumn) <= 2) ||
-                (snippet.range.endLineNumber === currentRange.startLineNumber &&
-                  Math.abs(snippet.range.endColumn - currentRange.startColumn) <= 2) ||
-                currentRange.intersectRanges(snippet.range) !== null;
-
-              if (isAdjacentOrOverlapping) {
-                existingToMerge = highlight;
-                const startLine = Math.min(
-                  currentRange.startLineNumber,
-                  snippet.range.startLineNumber
-                );
-                const startCol =
-                  currentRange.startLineNumber === snippet.range.startLineNumber
-                    ? Math.min(currentRange.startColumn, snippet.range.startColumn)
-                    : currentRange.startLineNumber < snippet.range.startLineNumber
-                    ? currentRange.startColumn
-                    : snippet.range.startColumn;
-
-                const endLine = Math.max(
-                  currentRange.endLineNumber,
-                  snippet.range.endLineNumber
-                );
-                const endCol =
-                  currentRange.endLineNumber === snippet.range.endLineNumber
-                    ? Math.max(currentRange.endColumn, snippet.range.endColumn)
-                    : currentRange.endLineNumber > snippet.range.endLineNumber
-                    ? currentRange.endColumn
-                    : snippet.range.endColumn;
-
-                mergedRange = new monaco.Range(startLine, startCol, endLine, endCol);
-                break;
-              }
-            }
-          }
-        }
-
-        const hoverText = isMe
-          ? `✍️ **You (${userName})** edited this snippet`
-          : `✍️ **${userName}** edited this snippet`;
-
-        const decorationOptions: monaco.editor.IModelDecorationOptions = {
-          isWholeLine: false, // Strictly snippet only, NEVER whole line!
-          className: `yRemoteEdit yRemoteEdit-${snippet.clientId}`,
-          inlineClassName: `yRemoteEditInline yRemoteEditInline-${snippet.clientId}`,
-          hoverMessage: {
-            value: hoverText,
-          },
-          overviewRuler: {
-            color: userColor,
-            position: 4,
-          },
-          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
-          zIndex: 10,
-        };
-
-        const oldIds = existingToMerge ? [existingToMerge.id] : [];
-        if (existingToMerge) {
-          editorHighlights!.delete(existingToMerge.id);
-        }
-
-        const newIds = editor.deltaDecorations(oldIds, [
-          {
-            range: mergedRange,
-            options: decorationOptions,
-          },
-        ]);
-
-        if (newIds && newIds.length > 0) {
-          const decId = newIds[0];
-          const entry: ActiveEditHighlight = {
-            id: decId,
-            clientId: snippet.clientId,
-            userName,
-            userColor,
-            fadeTimer: null,
-            removeTimer: null,
-          };
-
-          // Permanent edit highlight: stays active so users can check who edited where at any point
-          editorHighlights!.set(decId, entry);
-        }
-      });
-    });
-  }
 
   /**
    * Highlights code snippets edited by remote online peers while this user was offline.
@@ -1053,6 +1091,20 @@ export class MonacoCollabBinding {
   destroy(): void {
     if (this._isDestroyed) return;
     this._isDestroyed = true;
+
+    // Immediately flush any pending local edits so they are not lost on unmount or file switch
+    if (this._localTypingTimer) {
+      clearTimeout(this._localTypingTimer);
+      this._localTypingTimer = null;
+      try {
+        this._commitLocalLineEdits();
+      } catch {}
+    }
+
+    this._remoteTypingTimers.forEach((timer) => clearTimeout(timer));
+    this._remoteTypingTimers.clear();
+    this._pendingRemoteRanges.clear();
+    this._pendingLocalRanges = [];
 
     try {
       this.editsMap.unobserve(this._editsMapObserver);

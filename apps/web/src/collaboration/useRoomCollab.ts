@@ -665,6 +665,23 @@ export function useRoomCollab({
     const updateActiveEdits = () => {
       const list = (Array.from(editsMap.values()) as FileEditLogEntry[])
         .filter((e) => Boolean(e && e.id))
+        .map((entry) => {
+          if (editor && editor.getModel() && fileDocRef.current && entry.startRelPos) {
+            try {
+              const abs = Y.createAbsolutePositionFromRelativePosition(
+                entry.startRelPos,
+                fileDocRef.current
+              );
+              if (abs) {
+                const pos = editor.getModel()!.getPositionAt(abs.index);
+                if (pos && pos.lineNumber !== entry.linePreview) {
+                  return { ...entry, linePreview: pos.lineNumber };
+                }
+              }
+            } catch {}
+          }
+          return entry;
+        })
         .sort((a, b) => b.timestamp - a.timestamp);
       setActiveFileEdits(list);
 
