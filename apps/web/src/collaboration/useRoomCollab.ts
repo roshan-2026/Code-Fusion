@@ -36,8 +36,39 @@ function reconcileOfflineSync(
   baselineContent: string | null
 ): number[] {
   const yText = fileDoc.getText('monaco');
-  const currentContent = yText.toString();
+  let currentContent = yText.toString();
   if (!currentContent) return [];
+
+  // 1. Guard against multi-line duplicate blocks (e.g. entire code block copied 2x, 3x, or 4x)
+  const rawLines = currentContent.trim().split('\n');
+  for (const divisor of [4, 3, 2]) {
+    if (rawLines.length >= divisor * 2 && rawLines.length % divisor === 0) {
+      const chunkSize = rawLines.length / divisor;
+      const firstChunk = rawLines.slice(0, chunkSize).join('\n').trim();
+      let allMatch = true;
+      for (let d = 1; d < divisor; d++) {
+        const chunk = rawLines.slice(d * chunkSize, (d + 1) * chunkSize).join('\n').trim();
+        if (chunk !== firstChunk) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch && firstChunk.length >= 10) {
+        let keepLength = 0;
+        for (let i = 0; i < chunkSize; i++) {
+          keepLength += rawLines[i].length + (i < chunkSize - 1 ? 1 : 0);
+        }
+        if (currentContent[keepLength] === '\n') {
+          keepLength += 1;
+        }
+        fileDoc.transact(() => {
+          yText.delete(keepLength, yText.length - keepLength);
+        }, 'offline-duplicate-block-reconcile');
+        currentContent = yText.toString();
+        break;
+      }
+    }
+  }
 
   const lines = currentContent.split('\n');
   const baselineLines = baselineContent ? baselineContent.split('\n') : [];
@@ -187,8 +218,13 @@ export function useRoomCollab({
       onSynced() {
         setConnectionStatus('online');
 
-        // Initialize shared files map if empty
-        if (yFilesMap.size === 0 && initialFiles && initialFiles.length > 0) {
+        // Initialize shared files map if empty (Creator only!)
+        if (
+          yFilesMap.size === 0 &&
+          initialFiles &&
+          initialFiles.length > 0 &&
+          currentUser.id === creatorUser.id
+        ) {
           roomDoc.transact(() => {
             initialFiles.forEach((file) => {
               yFilesMap.set(file.id, file);
@@ -314,12 +350,15 @@ export function useRoomCollab({
       files.find((f) => f.id === activeFileId) ||
       initialFiles.find((f) => f.id === activeFileId);
     const seedContent = targetFile?.content || initialContent;
+    const isCreator = currentUser.id === creatorUser.id;
 
     let hasSeeded = false;
     const seedIfEmpty = () => {
-      if (hasSeeded) return;
+      // ONLY the creator of the room can seed initial template content if the document is still empty!
+      // A joining user must NEVER insert initial template code into an existing room.
+      if (!isCreator || hasSeeded) return;
       const yText = fileDoc.getText('monaco');
-      // Only seed if doc has 0 length after IndexedDB/provider sync has delivered data
+      // Only seed if doc has 0 length after provider sync has confirmed the room document is empty
       if (yText.length === 0 && seedContent) {
         fileDoc.transact(() => {
           if (yText.length === 0) {
@@ -351,15 +390,18 @@ export function useRoomCollab({
     fileIndexeddbRef.current = fileIndexeddb;
 
     fileIndexeddb.once('synced', () => {
-      seedIfEmpty();
       registerClientMeta();
-      // If we loaded cached content from previous offline session, snapshot as baseline
-      if (!offlineStateVectorRef.current && fileDocRef.current) {
-        offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
-        const cached = fileDocRef.current.getText('monaco').toString();
-        if (cached && cached.length > 0) {
-          offlineBaselineTextRef.current = cached;
-          wasOfflineRef.current = true;
+      // DO NOT call seedIfEmpty() here!
+      // Local IndexedDB is only a client cache. Never insert initial content before the server syncs.
+      // Only if the browser is literally offline with cached content do we treat it as an offline baseline:
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (!offlineStateVectorRef.current && fileDocRef.current) {
+          offlineStateVectorRef.current = Y.encodeStateVector(fileDocRef.current);
+          const cached = fileDocRef.current.getText('monaco').toString();
+          if (cached && cached.length > 0) {
+            offlineBaselineTextRef.current = cached;
+            wasOfflineRef.current = true;
+          }
         }
       }
     });
@@ -377,6 +419,7 @@ export function useRoomCollab({
         registerClientMeta();
       },
       onSynced() {
+        // Only creator will seed if doc is still empty after server sync
         seedIfEmpty();
         registerClientMeta();
 

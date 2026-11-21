@@ -391,6 +391,46 @@ export function deleteRoomFile(roomCode: string, fileId: string): void {
 }
 
 /**
+ * Retrieves a single file from a room by ID
+ */
+export function getRoomFile(roomCode: string, fileId: string): ProjectFile | null {
+  const cleanCode = roomCode.toUpperCase();
+  const stmt = db.prepare(`
+    SELECT id, room_code as projectId, name, path, language, content,
+           is_recycled as isRecycled, recycled_by as recycledBy,
+           recycled_at as recycledAt, delete_votes as deleteVotes,
+           created_at as createdAt, updated_at as updatedAt
+    FROM room_files
+    WHERE room_code = ? AND id = ?
+  `);
+
+  const r = stmt.get(cleanCode, fileId) as any;
+  if (!r) return null;
+
+  let votes: string[] = [];
+  try {
+    votes = typeof r.deleteVotes === 'string' ? JSON.parse(r.deleteVotes) : r.deleteVotes || [];
+  } catch {
+    votes = [];
+  }
+
+  return {
+    id: r.id,
+    projectId: r.projectId,
+    name: r.name,
+    path: r.path,
+    language: r.language,
+    content: r.content,
+    isRecycled: Boolean(r.isRecycled),
+    recycledBy: r.recycledBy || undefined,
+    recycledAt: r.recycledAt || undefined,
+    deleteVotes: votes,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
+
+/**
  * Records a user's vote to delete a recycled file permanently.
  * If ALL joined room members have voted, the file is permanently deleted from SQLite database!
  */

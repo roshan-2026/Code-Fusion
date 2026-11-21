@@ -8,8 +8,9 @@ import {
   type onDisconnectPayload,
   type Hocuspocus,
 } from '@hocuspocus/server';
+import { parseDocumentName } from '@hostelcode/shared';
 import { authenticateConnection, authorizeDocumentAccess } from '../auth/index.js';
-import { getYDocUpdate, saveYDocUpdate } from '../persistence/database.js';
+import { getYDocUpdate, saveYDocUpdate, getRoomFile, getRoom } from '../persistence/database.js';
 
 export function createHocuspocusServer(): Hocuspocus {
   const server = Server.configure({
@@ -39,6 +40,44 @@ export function createHocuspocusServer(): Hocuspocus {
       if (snapshot && snapshot.byteLength > 0) {
         // Restore CRDT state from database
         Y.applyUpdate(data.document, snapshot);
+      } else {
+        // If no CRDT state exists yet in document_updates, seed authoritatively from SQLite database
+        let hasSeeded = false;
+
+        if (documentName.startsWith('project:')) {
+          const docInfo = parseDocumentName(documentName);
+          if (docInfo) {
+            const roomCode = docInfo.projectId.trim().toUpperCase();
+            const fileId = docInfo.fileId;
+            const file = getRoomFile(roomCode, fileId);
+            if (file && file.content) {
+              const yText = data.document.getText('monaco');
+              if (yText.length === 0) {
+                yText.insert(0, file.content);
+                hasSeeded = true;
+              }
+            }
+          }
+        } else if (documentName.startsWith('room:')) {
+          const roomCode = documentName.slice('room:'.length).trim().toUpperCase();
+          const room = getRoom(roomCode);
+          if (room && room.files && room.files.length > 0) {
+            const yFilesMap = data.document.getMap('files');
+            if (yFilesMap.size === 0) {
+              room.files.forEach((file) => {
+                yFilesMap.set(file.id, file);
+              });
+              hasSeeded = true;
+            }
+          }
+        }
+
+        // Immediately persist seeded initial state so all connecting peers see the exact same base
+        if (hasSeeded) {
+          const update = Y.encodeStateAsUpdate(data.document);
+          saveYDocUpdate(documentName, update);
+          console.log(`[Hocuspocus Server] Seeded initial content for document: ${documentName}`);
+        }
       }
       return data.document;
     },
